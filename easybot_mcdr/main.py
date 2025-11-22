@@ -13,6 +13,7 @@ import json
 import os
 import asyncio
 import time
+import traceback
 
 # 全局变量
 wsc: EasyBotWsClient = None
@@ -87,6 +88,7 @@ async def on_load(server: PluginServerInterface, prev_module):
         server.logger.info("EasyBot插件加载完成")
     except Exception as e:
         server.logger.error(f"插件加载过程中发生错误: {str(e)}")
+        server.logger.debug("\n{traceback.format_exc()}")
         raise
 
 
@@ -212,6 +214,7 @@ def on_server_started(server: PluginServerInterface):
         
     except Exception as e:
         server.logger.error(f"启动过程中发生未预期错误: {type(e).__name__}: {str(e)}")
+        server.logger.debug("\n{traceback.format_exc()}")
 
 async def setup_websocket_and_report(server: PluginServerInterface):
     """设置WebSocket连接并上报服务器信息"""
@@ -231,6 +234,7 @@ async def setup_websocket_and_report(server: PluginServerInterface):
         return True
     except Exception as e:
         server.logger.error(f"上报信息时出错: {str(e)}")
+        server.logger.debug("\n{traceback.format_exc()}")
         return False
 
 async def ensure_websocket_connection(server: PluginServerInterface):
@@ -291,6 +295,7 @@ async def report_online_players(server: PluginServerInterface):
                 server.logger.debug(f"玩家 {player} 信息上报成功")
         except Exception as e:
             server.logger.error(f"上报玩家 {player} 信息失败: {str(e)}")
+            server.logger.debug("\n{traceback.format_exc()}")
 
 def sync_online_players_if_available(server: PluginServerInterface):
     """如果RCON可用，同步在线玩家列表"""
@@ -364,6 +369,7 @@ async def on_unload(server: PluginServerInterface):
         server.logger.info("插件已完全卸载")
     except Exception as e:
         server.logger.error(f"卸载插件时出错: {e}")
+        server.logger.debug("\n{traceback.format_exc()}")
         raise
 
 async def close():
@@ -383,6 +389,7 @@ async def close():
                     pass
         except Exception as e:
             server_interface.logger.error(f"关闭连接时出错: {e}")
+            server.logger.debug("\n{traceback.format_exc()}")
         finally:
             wsc = None
 
@@ -442,6 +449,7 @@ def load_player_data(server: PluginServerInterface):
             os.remove("easybot_cache.json")
         except Exception as e:
             server.logger.error(f"加载玩家数据时出错: {str(e)}")
+            server.logger.debug("\n{traceback.format_exc()}")
             init_player_api(server, None)
     else:
         server.logger.info("未找到缓存文件，初始化空玩家数据")
@@ -461,6 +469,7 @@ async def initialize_websocket_client(server: PluginServerInterface):
             await wsc.stop()
         except Exception as e:
             server.logger.error(f"关闭现有连接时出错: {str(e)}")
+            server.logger.debug("\n{traceback.format_exc()}")
     
     # 直接使用EasyBotWsClient，不再创建增强版本
     # is_connected方法已在ws.py中实现
@@ -568,6 +577,7 @@ async def reload(source: CommandSource):
         source.reply("§a插件重载成功!")
     except Exception as e:
         server_interface.logger.error(f"重载时出错: {str(e)}")
+        server.logger.debug("\n{traceback.format_exc()}")
         source.reply(f"§c重载失败: {str(e)}")
 
 async def say(source: CommandSource, context: CommandContext):
@@ -676,6 +686,7 @@ async def on_player_joined(server: PluginServerInterface, player: str, info: Inf
         await wsc.push_enter(player)
     except Exception as e:
         server.logger.error(f"处理玩家 {player} 加入时出错: {e}")
+        server.logger.debug("\n{traceback.format_exc()}")
 
 # 统一的玩家退出上报函数
 async def _report_player_exit(server: PluginServerInterface, name: str):
@@ -703,6 +714,7 @@ async def _report_player_exit(server: PluginServerInterface, name: str):
         server.logger.debug(f"已上报玩家退出: {name}")
     except Exception as e:
         server.logger.error(f"上报玩家 {name} 退出失败: {e}")
+        server.logger.debug("\n{traceback.format_exc()}")
 
 async def on_info(server, info: Info):
     raw = info.raw_content
@@ -762,6 +774,7 @@ async def on_info(server, info: Info):
                     server.execute(f"whitelist add {name}")
             except Exception as e:
                 server.logger.error(f"获取玩家 {name} 绑定信息失败: {str(e)}")
+                server.logger.debug("\n{traceback.format_exc()}")
         return
 
     # 玩家退出消息处理（兼容含前缀名称与额外前后缀文本）
@@ -811,12 +824,9 @@ def periodic_uuid_check():
                         update_player_uuid(player, expected_uuid)
                         
         except Exception as e:
-            try:
-                ServerInterface.get_instance().logger.error(f"UUID同步检查出错: {e}")
-            except Exception:
-                import logging
-                logging.error(f"UUID同步检查出错: {e}")
-            time.sleep(60)  # 出错后等待更长时间
+            server = ServerInterface.get_instance()
+            server.logger.error(f"UUID同步检查出错: {e}")
+            server.logger.debug("\n{traceback.format_exc()}")
 
 
 async def on_player_death(server: PluginServerInterface, player: str, killer: str = None):
