@@ -3,7 +3,7 @@ import websockets
 from easybot_mcdr.api.player import get_data_map, init_player_api
 from easybot_mcdr.config import get_config, load_config, save_config
 from easybot_mcdr.utils import is_white_list_enable
-from easybot_mcdr.websocket.ws import EasyBotWsClient
+from easybot_mcdr.websocket.ws_ext import ExtendedEasyBotWsClient as EasyBotWsClient
 from easybot_mcdr.impl.get_server_info import get_online_mode
 import easybot_mcdr.impl.cross_server_chat
 from easybot_mcdr.impl.prefix_handler import PrefixNameHandler
@@ -23,6 +23,8 @@ exit_reported_at = {}
 debounce_time = 5 
 
 from easybot_mcdr.meta import get_plugin_version
+from easybot_mcdr.rpc import bind_registered_handlers
+import easybot_mcdr.impl.rpc_handlers  # 注册 bridge_rpc 处理器
 
 help_msg = '''--------§a EasyBot §r(版本: §e{0}§r)--------
 §b!!ez help §f- §c显示帮助菜单
@@ -78,6 +80,8 @@ async def on_load(server: PluginServerInterface, prev_module):
         
         # 初始化WebSocket客户端
         wsc = await initialize_websocket_client(server)
+        # 绑定已注册的 RPC 处理器（装饰器可能在加载时已注册）
+        bind_registered_handlers()
         
         # 注册事件监听器
         register_event_listeners(server)
@@ -344,9 +348,21 @@ async def on_unload(server: PluginServerInterface):
     global player_data_map, wsc, server_interface
     
     try:
-        # 在关闭连接前，上报服务器关闭
+        # 在关闭连接前，上报服务器关闭（仅在已连接时尝试）
         if wsc:
-            await wsc.data_record("Offline", "Server Stopped", "System")
+            try:
+                connected = False
+                if hasattr(wsc, "is_connected"):
+                    try:
+                        connected = await wsc.is_connected()  # type: ignore
+                    except Exception:
+                        connected = False
+                if connected:
+                    await wsc.data_record("Offline", "Server Stopped", "System")
+                else:
+                    server.logger.info("WebSocket 未连接，跳过下线上报")
+            except Exception as e:
+                server.logger.warning(f"跳过下线上报，原因: {e}")
             
         # 保存玩家数据
         player_data_map = get_data_map()
@@ -705,8 +721,9 @@ async def on_player_joined(server: PluginServerInterface, player: str, info: Inf
             server.tell(player, f"§c[EasyBot] 验证未通过: {kick_msg}")
             server.tell(player, "§c[EasyBot] 您将在 5 秒后被移出服务器，请按照提示操作。")
             
-            # 3. 等待并执行踢出
-            await asyncio.sleep(5) 
+            # 3. 等待并执行踢出（可配置）
+            kick_delay = get_config().get("kick_delay_seconds", 5)
+            await asyncio.sleep(kick_delay)
             push_kick(player, kick_msg)
             return
             

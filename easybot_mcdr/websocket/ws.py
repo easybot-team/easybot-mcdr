@@ -325,7 +325,20 @@ class EasyBotWsClient:
                                 handler(ctx, data, self._session_info)
                         except Exception as e:
                             server.logger.error(f"[EasyBot] 处理 exec_op={exec_op} 时出错: {str(e)}")
-            
+                else:
+                    # 未知 exec_op，若存在回调 ID，则回传失败避免调用方超时
+                    callback_id = data.get("callback_id")
+                    if callback_id:
+                        try:
+                            await self.send(json.dumps({
+                                "op": 5,
+                                "callback_id": callback_id,
+                                "exec_op": exec_op,
+                                "success": False,
+                                "text": f"unknown exec_op: {exec_op}"
+                            }))
+                        except Exception:
+                            pass
             elif op == 5:
                 callback_id = data.get("callback_id")
                 if callback_id in self._pending_requests:

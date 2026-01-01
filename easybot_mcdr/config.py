@@ -51,6 +51,11 @@ def load_config(server: PluginServerInterface):
                 "prefixes": ["Bot_", "BOT_", "bot_"]
             }
             save_config(server)
+
+        # 确保踢出延迟配置存在
+        if "kick_delay_seconds" not in config:
+            config["kick_delay_seconds"] = 5
+            save_config(server)
             
         server.logger.info(f"配置文件路径: {config_file_path}")
         server.logger.info("配置文件加载成功")
