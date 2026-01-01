@@ -3,6 +3,7 @@
     "ws": "ws://localhost:26990/bridge",
     "server_name": "server_name",
     "debug": false,
+    "kick_delay_seconds": 5,
     "message_sync": {
         "ignore_mcdr_command": true
     },
