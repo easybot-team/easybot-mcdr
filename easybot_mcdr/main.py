@@ -539,10 +539,9 @@ def register_event_listeners(server: PluginServerInterface):
     # 注册信息事件处理
     server.register_event_listener('mcdr.general_info', on_info, priority=1)
     
-    # 注册玩家相关事件
+    # 注册玩家相关事件（避免重复注册：mcdr.player_left 已包含 player_left）
     server.register_event_listener('player_death', on_player_death)
     server.register_event_listener('mcdr.player_left', on_player_left)
-    server.register_event_listener('player_left', on_player_left)
     server.register_event_listener('player_joined', on_player_joined)
     
     server.logger.info("事件监听器注册完成")
@@ -835,21 +834,7 @@ async def on_info(server, info: Info):
                 server.logger.debug("\n{traceback.format_exc()}")
         return
 
-    # 玩家退出消息处理（兼容含前缀名称与额外前后缀文本）
-    m_quit = re.search(r"(?:\[[^\]]+\])?(?P<name>[\w.]+) left the game", raw)
-    if m_quit:
-        name = m_quit.group('name')
-        server.logger.debug(f"检测到退出行，解析玩家: {name} | 原始: {raw}")
-        await _report_player_exit(server, name)
-        return
-
-    # 兼容 "lost connection:" 形式（有些服务端不打印 left the game）
-    m_lost = re.search(r"(?:\[[^\]]+\])?(?P<name>[\w.]+) lost connection:\s*", raw)
-    if m_lost:
-        name = m_lost.group('name')
-        server.logger.debug(f"检测到断开行，解析玩家: {name} | 原始: {raw}")
-        await _report_player_exit(server, name)
-        return
+    # 玩家退出由 on_player_left 事件统一处理，此处不重复处理
 
 # 新增：定期UUID同步检查函数
 @new_thread("UUID_Sync_Check")
@@ -898,31 +883,7 @@ async def on_player_death(server: PluginServerInterface, player: str, killer: st
     server.logger.debug(f"正常玩家 {player} 死亡事件处理")
 
 async def on_player_left(server: PluginServerInterface, player: str):
-    config = get_config()
-    bot_filter = config.get("bot_filter", {"enabled": True, "prefixes": ["Bot_", "BOT_", "bot_"]})
-    server.logger.debug(f"处理玩家退出事件: {player}, 假人过滤状态: enabled={bot_filter['enabled']}")
-    
-    if player in kick_map:
-        if time.time() - kick_map[player] < 15:
-            server.logger.debug(f"玩家 {player} 是被踢出的，跳过处理")
-            return
-        else:
-            kick_map.pop(player, None)
-        
-    if is_bot_player(player):
-        server.logger.info(f"过滤假人 {player} 的退出事件 (匹配前缀: {bot_filter['prefixes']})")
-        return
-    
-    # 避免与 on_info 中的解析重复上报
-    now = time.time()
-    last = exit_reported_at.get(player, 0)
-    if now - last < 2.0:
-        server.logger.debug(f"忽略重复退出上报: {player}")
-        return
-    exit_reported_at[player] = now
-
-    server.logger.debug(f"正常玩家 {player} 退出事件处理")
-    await wsc.push_exit(player)
+    await _report_player_exit(server, player)
 
 async def on_user_info(server: PluginServerInterface, info: Info):
     if info.player is None:
