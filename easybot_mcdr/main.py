@@ -744,27 +744,26 @@ async def on_player_joined(server: PluginServerInterface, player: str, info: Inf
 
 # 统一的玩家退出上报函数
 async def _report_player_exit(server: PluginServerInterface, name: str):
-    # 踢出列表过滤
-    if name in kick_map:
-        if time.time() - kick_map[name] < 15:
-            server.logger.debug(f"玩家 {name} 是被踢出的，退出事件上报已跳过")
-            return
-        else:
-            # 如果超过15秒残留的标记，清理掉，继续执行
-            kick_map.pop(name, None)
-
-    # 假人过滤
-    if is_bot_player(name):
-        server.logger.info(f"过滤假人 {name} 的退出事件")
-        return
-
-    # 去重
+    # 全局去重：mcdr.player_left 可能因 lost connection 和 left the game 触发两次
     now = time.time()
     last = exit_reported_at.get(name, 0)
     if now - last < debounce_time:
         server.logger.debug(f"忽略重复退出上报: {name}")
         return
     exit_reported_at[name] = now
+
+    # 踢出列表过滤
+    if name in kick_map:
+        if time.time() - kick_map[name] < 15:
+            server.logger.debug(f"玩家 {name} 是被踢出的，退出事件上报已跳过")
+            return
+        else:
+            kick_map.pop(name, None)
+
+    # 假人过滤
+    if is_bot_player(name):
+        server.logger.info(f"过滤假人 {name} 的退出事件")
+        return
 
     try:
         await wsc.push_exit(name)
