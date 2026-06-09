@@ -1,8 +1,0 @@
-*.mcdr
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.pyi
-__temp
-.idea
