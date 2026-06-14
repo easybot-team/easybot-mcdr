@@ -1,0 +1,197 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 集成测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          pip install -r requirements.txt
+          pip install mcdreforged>=2.14
+          pip install pytest pytest-asyncio>=1.0.0
+
+      - name: 运行测试
+        run: pytest -v --tb=short 2>&1 | tee test-output.txt
+        continue-on-error: true
+
+      - name: 生成测试报告
+        if: always()
+        run: |
+          echo "## 🧪 测试报告" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # 统计结果
+          TOTAL=$(grep -c -E "PASSED|FAILED|ERROR" test-output.txt || true)
+          PASSED=$(grep -c "PASSED" test-output.txt || true)
+          FAILED=$(grep -c "FAILED" test-output.txt || true)
+
+          # 确保变量是数字（默认为0）
+          TOTAL=${TOTAL:-0}
+          PASSED=${PASSED:-0}
+          FAILED=${FAILED:-0}
+
+          echo "| 指标 | 结果 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 总计 | $TOTAL |" >> $GITHUB_STEP_SUMMARY
+          echo "| 通过 | ✅ $PASSED |" >> $GITHUB_STEP_SUMMARY
+          echo "| 失败 | ❌ $FAILED |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # 测试详情表格
+          echo "### 详细结果" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 测试项 | 结果 |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|------|" >> $GITHUB_STEP_SUMMARY
+          grep -E "(PASSED|FAILED|ERROR)" test-output.txt | sed 's/.*:://' | sed 's/ PASSED/ ✅ |/' | sed 's/ FAILED/ ❌ |/' | sed 's/ ERROR/ ⚠️ |/' >> $GITHUB_STEP_SUMMARY || true
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # 如果有失败，显示详细信息
+          if [ "$FAILED" -gt "0" ] 2>/dev/null; then
+            echo "### ❌ 失败详情" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            grep -A 20 "FAILED" test-output.txt | head -50 >> $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # 设置输出变量供后续步骤使用
+          echo "TEST_PASSED=$PASSED" >> $GITHUB_ENV
+          echo "TEST_FAILED=$FAILED" >> $GITHUB_ENV
+          echo "TEST_TOTAL=$TOTAL" >> $GITHUB_ENV
+
+          # 如果有失败则返回错误
+          if [ "$FAILED" -gt "0" ] 2>/dev/null; then
+            exit 1
+          fi
+  lint:
+    name: 代码检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 ruff
+        run: pip install ruff
+
+      - name: Ruff 代码检查
+        run: |
+          if ruff check . --output-file ruff-report.txt 2>&1 | tee ruff-output.txt; then
+            echo "## ✅ Ruff 代码检查通过" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Ruff 代码检查发现问题" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat ruff-output.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+  type-check:
+    name: 类型检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          pip install -r requirements.txt
+          pip install mcdreforged>=2.14
+
+      - name: 安装 pyright
+        run: pip install pyright
+
+      - name: Pyright 类型检查
+        run: |
+          if pyright 2>&1 | tee pyright-output.txt; then
+            echo "## ✅ Pyright 类型检查通过" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ⚠️ Pyright 类型检查发现问题（非阻断）" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -20 pyright-output.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+        continue-on-error: true
+
+  security:
+    name: 安全扫描
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 pip-audit
+        run: pip install pip-audit
+
+      - name: 审计依赖安全
+        run: |
+          if pip-audit -r requirements.txt 2>&1 | tee audit-output.txt; then
+            echo "## ✅ 依赖安全检查通过" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ 依赖安全检查发现问题" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat audit-output.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+  import-check:
+    name: 导入检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          pip install -r requirements.txt
+          pip install mcdreforged>=2.14
+
+      - name: 检查模块导入
+        run: |
+          python -c "
+          import importlib, sys, pathlib
+
+          errors = []
+          for f in pathlib.Path('easybot_mcdr').rglob('*.py'):
+              mod = f.with_suffix('').as_posix().replace('/', '.')
+              try:
+                  importlib.import_module(mod)
+              except Exception as e:
+                  # 跳过 MCDR 运行时错误，只关注导入/语法问题
+                  if isinstance(e, (SyntaxError, ImportError, ModuleNotFoundError)):
+                      errors.append((mod, str(e)))
+
+          if errors:
+              for m, e in errors:
+                  print(f'失败: {m} -> {e}', file=sys.stderr)
+              sys.exit(1)
+          print('所有模块均可导入（或仅有预期的 MCDR 运行时依赖）')
+          "

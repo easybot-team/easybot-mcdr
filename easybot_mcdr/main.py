@@ -20,7 +20,8 @@ wsc: EasyBotWsClient = None
 player_data_map = {}
 rcon_initialized = False
 exit_reported_at = {}
-debounce_time = 5 
+debounce_time = 5
+kick_map = {}
 
 from easybot_mcdr.meta import get_plugin_version
 from easybot_mcdr.rpc import bind_registered_handlers
@@ -38,6 +39,10 @@ help_msg = '''--------§a EasyBot §r(版本: §e{0}§r)--------
 §b!!ez say <message> §f- §c发送消息
 §b!!esay <message> §f- §c同上
 §b!!say <message> §f- §c同上
+
+§cRCON配置(需MCDR 3级权限及以上)
+§b!!ez rcon auto §f- §c自动配置RCON
+§b!!ez rcon status §f- §c查看RCON状态
 
 §c假人过滤设置(需MCDR 3级权限及以上)
 §b!!ez bot toggle §f- §c开启/关闭假人过滤
@@ -59,18 +64,92 @@ def is_bot_player(player: str) -> bool:
     return any(player.startswith(prefix) for prefix in prefixes)
 
 
+def fix_mcdr_encoding(server: PluginServerInterface):
+    """检查并修复 MCDR 的编码配置，确保能正确处理中文"""
+    try:
+        import os
+        config_path = os.path.join(os.getcwd(), "config.yml")
+
+        if not os.path.exists(config_path):
+            server.logger.debug("未找到 MCDR config.yml，跳过编码检查")
+            return
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # 检查 decoding 配置
+        # 期望格式: decoding: ['utf8', 'gbk']
+        lines = content.split("\n")
+        modified = False
+        new_lines = []
+
+        for line in lines:
+            stripped = line.strip()
+            # 匹配 decoding: utf8 或 decoding: "utf8" 等格式
+            if stripped.startswith("decoding:") and "gbk" not in stripped:
+                # 检查是否是单个值（不是列表）
+                value = stripped.split(":", 1)[1].strip()
+                if value.startswith("["):
+                    # 已经是列表格式，但没有 gbk
+                    if "gbk" not in value:
+                        # 在列表中添加 gbk
+                        value = value.rstrip("]").rstrip()
+                        new_line = line.replace(stripped, f"decoding: {value}, 'gbk']")
+                        new_lines.append(new_line)
+                        modified = True
+                        server.logger.info(f"已修复 MCDR decoding 配置: 添加 gbk 支持")
+                        continue
+                else:
+                    # 单个值格式，改为列表
+                    new_line = line.replace(stripped, f"decoding: ['utf8', 'gbk']")
+                    new_lines.append(new_line)
+                    modified = True
+                    server.logger.info(f"已修复 MCDR decoding 配置: {value} -> ['utf8', 'gbk']")
+                    continue
+            new_lines.append(line)
+
+        if modified:
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(new_lines))
+            server.logger.info("MCDR 编码配置已修复")
+            # 设置标志，以便在命令注册后执行 reload
+            server._easybot_encoding_fixed = True
+        else:
+            server.logger.debug("MCDR decoding 配置正常，无需修改")
+
+    except Exception as e:
+        server.logger.warning(f"检查 MCDR 编码配置时出错: {e}")
+
+
 async def on_load(server: PluginServerInterface, prev_module):
     """插件加载时执行的函数"""
     global server_interface, wsc
     server_interface = server
     server.logger.info("开始加载EasyBot插件...")
-    
+
     try:
         # 加载配置
         load_config(server)
-        
+
+        # 检查并修复 MCDR 的编码配置
+        fix_mcdr_encoding(server)
+
+        # 初始化 behavior_impl (PlayerDataGetter 等)
+        from easybot_mcdr import behavior_impl
+        behavior_impl.set_server(server)
+
+        # 启动本地图片服务器（如果启用了图片上传）
+        if get_config().get("image_upload", {}).get("enabled"):
+            from easybot_mcdr.impl.chat_image import start_local_image_server
+            start_local_image_server()
+
         # 注册服务器处理器
-        server.register_server_handler(PrefixNameHandler())
+        config = get_config()
+        if config.get("handler", {}).get("enabled", True):
+            server.register_server_handler(PrefixNameHandler())
+            server.logger.info("已启用自定义前缀处理器")
+        else:
+            server.logger.info("使用 MCDR 默认处理器")
 
         # 启动UUID检查线程
         start_uuid_check_thread(server)
@@ -85,10 +164,22 @@ async def on_load(server: PluginServerInterface, prev_module):
         
         # 注册事件监听器
         register_event_listeners(server)
-        
+
         # 注册命令
         register_commands(server)
-        
+
+        # 如果编码配置被修改，提示用户手动执行
+        if getattr(server, '_easybot_encoding_fixed', False):
+            server.logger.info("编码配置已修改，请手动执行 !!MCDR reload config 使配置生效")
+
+        # 检查 RCON 配置
+        if not server.is_rcon_running():
+            from easybot_mcdr.rcon_config import check_rcon_config
+            status = check_rcon_config(server)
+            if status["needs_config"]:
+                server.logger.warning("§cRCON 未配置! 部分功能(命令执行、玩家皮肤获取)可能受限。")
+                server.logger.warning("§e使用 §b!!ez rcon auto §e自动配置RCON")
+
         server.logger.info("EasyBot插件加载完成")
     except Exception as e:
         server.logger.error(f"插件加载过程中发生错误: {str(e)}")
@@ -346,8 +437,11 @@ async def show_plugin_info(source: CommandSource):
 
 async def on_unload(server: PluginServerInterface):
     global player_data_map, wsc, server_interface
-    
+
     try:
+        # 停止本地图片服务器
+        from easybot_mcdr.impl.chat_image import stop_local_image_server
+        stop_local_image_server()
         # 在关闭连接前，上报服务器关闭（仅在已连接时尝试）
         if wsc:
             try:
@@ -524,20 +618,21 @@ async def initialize_websocket_client(server: PluginServerInterface):
 
 def register_event_listeners(server: PluginServerInterface):
     """注册事件监听器"""
+    from easybot_mcdr.impl.player_events import on_player_joined, on_player_left, on_player_death, on_info
+    from easybot_mcdr.impl.chat_sync import on_user_info
+
     server.logger.info("注册事件监听器...")
-    
-    # 注册服务器启动事件（使用较低优先级以避免与其他插件冲突）
+
     server.register_event_listener('server_started', on_server_started, priority=50)
-    
-    # 注册信息事件处理
     server.register_event_listener('mcdr.general_info', on_info, priority=1)
-    
-    # 注册玩家相关事件
     server.register_event_listener('player_death', on_player_death)
     server.register_event_listener('mcdr.player_left', on_player_left)
     server.register_event_listener('player_left', on_player_left)
-    server.register_event_listener('player_joined', on_player_joined)
-    
+    # 注意: mcdr.player_joined 事件已在 player.py 的 init_player_api() 中以优先级1注册
+    # 这里使用优先级10，确保在 player.py 的数据更新之后执行上报逻辑
+    server.register_event_listener('mcdr.player_joined', on_player_joined, priority=10)
+    server.register_event_listener('mcdr.user_info', on_user_info)
+
     server.logger.info("事件监听器注册完成")
 
 def register_commands(server: PluginServerInterface):
@@ -556,6 +651,10 @@ def register_commands(server: PluginServerInterface):
     builder.command("!!say <message>", say)
     builder.command("!!esay <message>", say)
     builder.command("!!ez say <message>", say)
+
+    # RCON 配置命令
+    builder.command("!!ez rcon auto", rcon_auto)
+    builder.command("!!ez rcon status", rcon_status)
 
     # 假人过滤命令
     builder.command("!!ez bot toggle", toggle_bot_filter)
@@ -614,23 +713,48 @@ async def say(source: CommandSource, context: CommandContext):
     await wsc.push_message(name, context["message"], True)
     source.reply("§a消息已发送: §f" + context["message"])
 
-kick_map = {}
-
-def push_kick(player: str, reason: str):
-    global kick_map
-    if reason is None or reason.strip() == "":
-        reason = "你已被踢出服务器"
-    server = ServerInterface.get_instance()
-    # 记录当前时间戳，而不是简单的 append
-    kick_map[player] = time.time()
-    if not server.is_rcon_running():
-        server.logger.error("你的服务器RCON当前并未运行,踢出玩家的原因无法显示多行。")
-        server.logger.error(f"即将踢出玩家 {player} 并且只显示踢出原因的第一行!")
-        first_line = reason.split("\n")[0]
-        server.execute(f"kick {player} {first_line}")
+async def rcon_auto(source: CommandSource):
+    """自动配置RCON"""
+    if not source.has_permission(3):
+        source.reply("§c你没有权限使用这个命令!")
         return
-    server.rcon_query(f"kick {player} {reason}")
-    kick_map[player] = time.time()
+    from easybot_mcdr.rcon_config import check_rcon_config, auto_configure_rcon
+    server = source.get_server()
+    status = check_rcon_config(server)
+    if status["rcon_enabled"] and server.is_rcon_running():
+        source.reply(f"§aRCON 已配置并运行中! (端口: {status['rcon_port']})")
+        return
+    source.reply("§e正在自动配置RCON...")
+    success = auto_configure_rcon(server)
+    if success:
+        new_status = check_rcon_config(server)
+        if server.is_rcon_running():
+            source.reply(f"§aRCON 配置已同步! (端口: {new_status['rcon_port']})")
+        else:
+            source.reply(f"§aRCON 自动配置完成! 端口: §f{new_status['rcon_port']}")
+            source.reply("§e请重启服务器生效。")
+    else:
+        source.reply("§cRCON 自动配置失败，请检查日志。")
+
+async def rcon_status(source: CommandSource):
+    """查看RCON状态"""
+    from easybot_mcdr.rcon_config import check_rcon_config, test_rcon_connection
+    status = check_rcon_config(source.get_server())
+    running = test_rcon_connection(source.get_server())
+    port_ok = "§a是" if not status["port_mismatch"] else f"§c否 (MCDR:{status['rcon_port']} vs 服务端:{status['server_rcon_port']})"
+    lines = [
+        '--------§a RCON 状态 §r--------',
+        f'§bMCDR RCON: §f{"§a启用" if status["mcdr_rcon_enabled"] else "§c禁用"}',
+        f'§b服务端 RCON: §f{"§a启用" if status["server_rcon_enabled"] else "§c禁用"}',
+        f'§bRCON 端口: §f{status["rcon_port"]}',
+        f'§b端口一致: §f{port_ok}',
+        f'§bRCON 连接: §f{"§a正常" if running else "§c未连接"}',
+        '---------------------------------------------'
+    ]
+    if status["needs_config"]:
+        lines.append("§e提示: 使用 §b!!ez rcon auto §e自动配置RCON")
+    for line in lines:
+        source.reply(line)
 
 async def toggle_bot_filter(source: CommandSource):
     if not source.has_permission(3):
@@ -684,165 +808,6 @@ async def list_bot_prefixes(source: CommandSource):
     source.reply(f"§a假人过滤状态: {state}")
     source.reply("§a假人前缀列表: " + ", ".join(prefixes) if prefixes else "§c无前缀")
 
-async def on_player_joined(server: PluginServerInterface, player: str, info: Info):
-    try:
-        from easybot_mcdr.api.player import cached_data
-        
-        config = get_config()
-        bot_filter = config.get("bot_filter", {"enabled": True, "prefixes": ["Bot_", "BOT_", "bot_"]})
-        server.logger.debug(f"假人过滤配置: enabled={bot_filter['enabled']}, prefixes={bot_filter['prefixes']}")
-        
-        if is_bot_player(player):
-            ip = "unknown"
-            if match := re.search(r'\d+\.\d+\.\d+\.\d+', info.raw_content):
-                ip = match.group()
-            player_info = cached_data.get(player)
-            uuid = player_info.uuid if player_info else "unknown"
-            server.logger.info(f"检测到假人 {player} (匹配前缀: {bot_filter['prefixes']}), UUID={uuid}, IP={ip}")
-            return
-
-        player_info = await wsc.report_player(player)
-        if player_info is None:
-            server.logger.warning(f"玩家 {player} 的信息未准备好，可能是数据同步延迟")
-            return
-        server.logger.info(f"玩家 {player} 已加入并缓存: UUID={player_info['player_uuid']}, IP={player_info['ip']}")
-        res = await wsc.login(player)
-        if res["kick"]:            
-            kick_msg = res.get("kick_message", "验证失败")
-            server.logger.info(f"检测到玩家 {player} 需要被踢出，等待加载延迟...")
-            # 记录到字典中，使用时间戳
-            kick_map[player] = time.time()
-            # 1. 标记为踢出，防止触发退出播报
-            if player not in kick_map:
-                kick_map[player] = time.time()
-            
-            # 2. 在踢出前发送聊天栏通知
-            # 使用红色文字 (§c) 醒目提示
-            server.tell(player, f"§c[EasyBot] 验证未通过: {kick_msg}")
-            server.tell(player, "§c[EasyBot] 您将在 5 秒后被移出服务器，请按照提示操作。")
-            
-            # 3. 等待并执行踢出（可配置）
-            kick_delay = get_config().get("kick_delay_seconds", 5)
-            await asyncio.sleep(kick_delay)
-            push_kick(player, kick_msg)
-            return
-            
-        if player in kick_map:
-            kick_map.pop(player)
-
-        await wsc.push_enter(player)
-
-    except Exception as e:
-        server.logger.error(f"处理玩家 {player} 加入时出错: {e}")
-        server.logger.debug("\n{traceback.format_exc()}")
-
-# 统一的玩家退出上报函数
-async def _report_player_exit(server: PluginServerInterface, name: str):
-    # 踢出列表过滤
-    if name in kick_map:
-        if time.time() - kick_map[name] < 15:
-            server.logger.debug(f"玩家 {name} 是被踢出的，退出事件上报已跳过")
-            return
-        else:
-            # 如果超过15秒残留的标记，清理掉，继续执行
-            kick_map.pop(name, None)
-
-    # 假人过滤
-    if is_bot_player(name):
-        server.logger.info(f"过滤假人 {name} 的退出事件")
-        return
-
-    # 去重
-    now = time.time()
-    last = exit_reported_at.get(name, 0)
-    if now - last < debounce_time:
-        server.logger.debug(f"忽略重复退出上报: {name}")
-        return
-    exit_reported_at[name] = now
-
-    try:
-        await wsc.push_exit(name)
-        server.logger.debug(f"已上报玩家退出: {name}")
-    except Exception as e:
-        server.logger.error(f"上报玩家 {name} 退出失败: {e}")
-        server.logger.debug("\n{traceback.format_exc()}")
-
-async def on_info(server, info: Info):
-    raw = info.raw_content
-    
-    # 正版UUID处理
-    if match := re.search(
-        r"UUID of player ([\w.]+) is ([0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})",
-        raw,
-    ):
-        name = match.group(1)
-        uuid = match.group(2).lower()
-        
-        if not is_bot_player(name):
-            from easybot_mcdr.api.player import update_player_uuid
-            update_player_uuid(name, uuid)
-            server.logger.info(f"从服务器获取到玩家 {name} 的正版UUID: {uuid}")
-        return
-    
-    # 玩家加入消息处理（用于离线模式UUID同步验证，兼容含前缀名称）
-    m_join_pref = re.search(r"^\[[^\]]+\](?P<name>[\w.]+) joined the game$", raw)
-    m_join_plain = re.search(r"^(?P<name>[\w.]+) joined the game$", raw)
-    if m_join_pref or m_join_plain:
-        name = (m_join_pref or m_join_plain).group('name')
-        
-        if is_bot_player(name):
-            server.logger.info(f"检测到假人 {name}，跳过UUID处理")
-            return
-        
-        # 确保UUID已正确设置（双重检查）
-        from easybot_mcdr.api.player import uuid_map, generate_offline_uuid, update_player_uuid, online_players, cached_data, PlayerInfo
-        
-        current_uuid = uuid_map.get(name)
-        if not current_uuid or current_uuid == "unknown":
-            # 生成或修正UUID
-            if not get_online_mode():
-                correct_uuid = generate_offline_uuid(name)
-                update_player_uuid(name, correct_uuid)
-                server.logger.info(f"修正玩家 {name} 的离线UUID: {correct_uuid}")
-        
-        # 在本地缓存玩家信息（供后续上报退出等使用）
-        try:
-            ip = "127.0.0.1"
-            if match_ip := re.search(r"\d+\.\d+\.\d+\.\d+", raw):
-                ip = match_ip.group()
-            # 若不存在则创建/更新
-            if name not in online_players:
-                online_players[name] = PlayerInfo(ip, name, uuid_map.get(name, "unknown"))
-            cached_data[name] = online_players[name]
-        except Exception as e:
-            server.logger.warning(f"写入玩家 {name} 本地缓存失败: {e}")
-
-        # 白名单处理
-        if is_white_list_enable():
-            try:
-                bind_info = await wsc.get_social_account(name)
-                if bind_info and bind_info.get("uuid"):
-                    server.execute(f"whitelist add {name}")
-            except Exception as e:
-                server.logger.error(f"获取玩家 {name} 绑定信息失败: {str(e)}")
-                server.logger.debug("\n{traceback.format_exc()}")
-        return
-
-    # 玩家退出消息处理（兼容含前缀名称与额外前后缀文本）
-    m_quit = re.search(r"(?:\[[^\]]+\])?(?P<name>[\w.]+) left the game", raw)
-    if m_quit:
-        name = m_quit.group('name')
-        server.logger.debug(f"检测到退出行，解析玩家: {name} | 原始: {raw}")
-        await _report_player_exit(server, name)
-        return
-
-    # 兼容 "lost connection:" 形式（有些服务端不打印 left the game）
-    m_lost = re.search(r"(?:\[[^\]]+\])?(?P<name>[\w.]+) lost connection:\s*", raw)
-    if m_lost:
-        name = m_lost.group('name')
-        server.logger.debug(f"检测到断开行，解析玩家: {name} | 原始: {raw}")
-        await _report_player_exit(server, name)
-        return
 
 # 新增：定期UUID同步检查函数
 @new_thread("UUID_Sync_Check")
@@ -878,60 +843,3 @@ def periodic_uuid_check():
             server = ServerInterface.get_instance()
             server.logger.error(f"UUID同步检查出错: {e}")
             server.logger.debug("\n{traceback.format_exc()}")
-
-
-async def on_player_death(server: PluginServerInterface, player: str, killer: str = None):
-    config = get_config()
-    bot_filter = config.get("bot_filter", {"enabled": True, "prefixes": ["Bot_", "BOT_", "bot_"]})
-    server.logger.debug(f"处理玩家死亡事件: {player}, 假人过滤状态: enabled={bot_filter['enabled']}")
-    
-    if is_bot_player(player):
-        server.logger.info(f"过滤假人 {player} 的死亡事件 (匹配前缀: {bot_filter['prefixes']})")
-        return
-    server.logger.debug(f"正常玩家 {player} 死亡事件处理")
-
-async def on_player_left(server: PluginServerInterface, player: str):
-    config = get_config()
-    bot_filter = config.get("bot_filter", {"enabled": True, "prefixes": ["Bot_", "BOT_", "bot_"]})
-    server.logger.debug(f"处理玩家退出事件: {player}, 假人过滤状态: enabled={bot_filter['enabled']}")
-    
-    if player in kick_map:
-        if time.time() - kick_map[player] < 15:
-            server.logger.debug(f"玩家 {player} 是被踢出的，跳过处理")
-            return
-        else:
-            kick_map.pop(player, None)
-        
-    if is_bot_player(player):
-        server.logger.info(f"过滤假人 {player} 的退出事件 (匹配前缀: {bot_filter['prefixes']})")
-        return
-    
-    # 避免与 on_info 中的解析重复上报
-    now = time.time()
-    last = exit_reported_at.get(player, 0)
-    if now - last < 2.0:
-        server.logger.debug(f"忽略重复退出上报: {player}")
-        return
-    exit_reported_at[player] = now
-
-    server.logger.debug(f"正常玩家 {player} 退出事件处理")
-    await wsc.push_exit(player)
-
-async def on_user_info(server: PluginServerInterface, info: Info):
-    if info.player is None:
-        return
-    if (
-        info.content.startswith("!!")
-        and get_config()["message_sync"]["ignore_mcdr_command"]
-    ):
-        return
-    await wsc.push_message(info.player, info.content, False)
-
-async def cross_server_say(source: CommandSource, context: CommandContext):
-    if not source.is_player:
-        source.reply("§c这个命令只能由玩家使用!")
-        return
-    player = source.player
-    message = context["message"]
-    await wsc.push_cross_server_message(player, message)
-    source.reply("§a你的消息已发送到其他服务器.")

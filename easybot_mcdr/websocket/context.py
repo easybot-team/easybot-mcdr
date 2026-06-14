@@ -7,11 +7,11 @@ class ExecContext:
         self.exec_op = exec_op
         self.ws = wsc
 
-    def callback(self, data: dict):
+    async def callback(self, data: dict):
         packet = {
             "op": 5,
             "callback_id": self.callback_id,
             "exec_op": self.exec_op
         }
         packet.update(data)
-        return self.ws.send(json.dumps(packet))
+        await self.ws.send(json.dumps(packet))

@@ -7,3 +7,5 @@ from . import message_sync
 from . import exec_command
 from . import cross_server_chat
 from . import sync_settings
+from . import player_events
+from . import chat_sync

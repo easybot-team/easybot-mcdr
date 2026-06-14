@@ -1,0 +1,20 @@
+{
+    "easybot_bridge.connected": "已连接到 EasyBot 服务器: {url}",
+    "easybot_bridge.disconnected": "已断开连接: {reason}",
+    "easybot_bridge.online": "身份验证成功! 服务器名: {name}",
+    "easybot_bridge.heartbeat_stopped": "心跳已停止",
+    "easybot_bridge.reconnecting": "正在尝试重连服务器...",
+    "easybot_bridge.send_failed": "发送消息失败: {error}",
+    "easybot_bridge.session_unavailable": "尝试发送消息但 session 不可用，消息被丢弃",
+    "easybot_bridge.unknown_opcode": "收到未知 OpCode: {opcode}",
+    "easybot_bridge.unknown_operation": "收到未知操作: {operation}",
+    "easybot_bridge.rpc_call_failed": "调用RPC方法失败: {error}",
+    "easybot_bridge.config_loaded": "配置已加载",
+    "easybot_bridge.starting": "EasyBot Bridge 正在启动...",
+    "easybot_bridge.stopping": "EasyBot Bridge 正在关闭...",
+    "easybot_bridge.stopped": "EasyBot Bridge 已关闭",
+    "easybot_bridge.received_hello": "收到服务器 Hello 握手",
+    "easybot_bridge.identity_sent": "身份已上报",
+    "easybot_bridge.identity_verified": "身份验证成功! 服务器名: {name}",
+    "easybot_bridge.sync_settings_received": "同步设置已收到"
+}

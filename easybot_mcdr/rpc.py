@@ -14,15 +14,6 @@ def bridge_rpc(exec_op: str, description: str = "") -> Callable[[Callable[..., A
 
     def decorator(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
         _registry[exec_op] = func
-
-        # 延迟导入以避免循环依赖
-        try:
-            from easybot_mcdr.websocket.ws import EasyBotWsClient
-            EasyBotWsClient.listen_exec_op(exec_op)(func)
-        except Exception:
-            # 如果还未加载 EasyBotWsClient，可以在运行时手动 bind_registered_handlers
-            pass
-
         return func
 
     return decorator

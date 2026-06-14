@@ -29,5 +29,5 @@ async def exec_un_bind_notify(ctx: ExecContext, data: dict, _):
         except Exception as e:
             logger.error(f"移除白名单失败: {e}")
 
-    from easybot_mcdr.main import push_kick
-    push_kick(player_name, "您已从聊群或管理平台解除账户绑定")
+    from easybot_mcdr.impl.player_events import _push_kick
+    _push_kick(player_name, "您已从聊群或管理平台解除账户绑定")

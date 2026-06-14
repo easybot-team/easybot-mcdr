@@ -1,0 +1,20 @@
+{
+    "easybot_bridge.connected": "Connected to EasyBot server: {url}",
+    "easybot_bridge.disconnected": "Disconnected: {reason}",
+    "easybot_bridge.online": "Identity verified! Server name: {name}",
+    "easybot_bridge.heartbeat_stopped": "Heartbeat stopped",
+    "easybot_bridge.reconnecting": "Attempting to reconnect to server...",
+    "easybot_bridge.send_failed": "Failed to send message: {error}",
+    "easybot_bridge.session_unavailable": "Session unavailable, message discarded",
+    "easybot_bridge.unknown_opcode": "Received unknown OpCode: {opcode}",
+    "easybot_bridge.unknown_operation": "Received unknown operation: {operation}",
+    "easybot_bridge.rpc_call_failed": "RPC call failed: {error}",
+    "easybot_bridge.config_loaded": "Configuration loaded",
+    "easybot_bridge.starting": "EasyBot Bridge starting...",
+    "easybot_bridge.stopping": "EasyBot Bridge stopping...",
+    "easybot_bridge.stopped": "EasyBot Bridge stopped",
+    "easybot_bridge.received_hello": "Received server Hello handshake",
+    "easybot_bridge.identity_sent": "Identity sent",
+    "easybot_bridge.identity_verified": "Identity verified! Server name: {name}",
+    "easybot_bridge.sync_settings_received": "Sync settings received"
+}

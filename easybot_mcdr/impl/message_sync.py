@@ -1,77 +1,108 @@
 import time
+from typing import Any, Dict, List
 from easybot_mcdr.config import get_config
+from easybot_mcdr.impl.chat_image import parse_chat_image, strip_image_codes
+from easybot_mcdr.message import Segment, SegmentType, segments_from_list
 from easybot_mcdr.websocket.context import ExecContext
 from easybot_mcdr.websocket.ws import EasyBotWsClient
 from mcdreforged.api.all import *
 
-@EasyBotWsClient.listen_exec_op("SEND_TO_CHAT")
-async def sync_message(ctx: ExecContext, data:dict, _):
-    # 输入验证
-    if not isinstance(data, dict):
-        ServerInterface.get_instance().logger.error("无效的消息数据格式")
-        return
-    
-    # 安全获取text
-    text = str(data.get("text", ""))
-    
-    # 处理extra数据
-    extra_data = []
-    if isinstance(data.get("extra"), list):
-        extra_data = data["extra"]
-    elif data.get("extra") is not None:
-        ServerInterface.get_instance().logger.warning(f"无效的extra格式: {type(data['extra'])}")
 
-    if not extra_data:
-        ServerInterface.get_instance().broadcast(text)
-        ServerInterface.get_instance().logger.info(text)
-        return
-    
+def _flatten_extra(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten nested extra arrays, extracting [[...]] image markers as IMAGE segments."""
+    import re
+    _DOUBLE_BRACKET = re.compile(r'\[\[(.+?)\]\]')
+
+    def _is_img_marker(item: dict) -> bool:
+        text = str(item.get("text", ""))
+        ce = item.get("clickEvent")
+        return (
+            _DOUBLE_BRACKET.search(text)
+            and isinstance(ce, dict)
+            and ce.get("action") == "open_url"
+        )
+
+    result = []
+    for item in data:
+        if not isinstance(item, dict):
+            result.append(item)
+            continue
+
+        nested = item.get("extra")
+        if isinstance(nested, list) and nested:
+            has_img = any(_is_img_marker(x) for x in nested if isinstance(x, dict))
+            if has_img:
+                for x in nested:
+                    if not isinstance(x, dict):
+                        if isinstance(x, str) and x:
+                            result.append({"type": SegmentType.TEXT, "text": x})
+                        continue
+                    if _is_img_marker(x):
+                        url = x.get("clickEvent", {}).get("value", "")
+                        m = _DOUBLE_BRACKET.search(str(x.get("text", "")))
+                        summary = m.group(1) if m else "图片"
+                        result.append({"type": SegmentType.IMAGE, "url": url, "summary": summary})
+                    else:
+                        t = str(x.get("text", ""))
+                        if t:
+                            result.append({"type": SegmentType.TEXT, "text": t})
+            else:
+                result.extend(_flatten_extra(nested))
+            continue
+
+        text = item.get("text", "")
+        if isinstance(text, str) and parse_chat_image(text):
+            for url, name in parse_chat_image(text):
+                result.append({"type": SegmentType.IMAGE, "url": url, "summary": name})
+            clean = strip_image_codes(text)
+            if clean:
+                result.append({"type": SegmentType.TEXT, "text": clean})
+        else:
+            result.append(item)
+    return result
+
+
+def render_segments(segments: List[Segment], text: str = ""):
+    server = ServerInterface.get_instance()
     text_list = RTextList()
     at_players = []
     current_text = ""
     has_at_all = False
+    has_cicode = False
 
-    def append_current_text():
+    def flush_text():
         nonlocal current_text
         if current_text:
             text_list.append(RText(current_text))
             current_text = ""
 
-    # 确保extra_data是可迭代的
-    extra_data = extra_data if isinstance(extra_data, list) else []
-    for segment in extra_data:
-        if not isinstance(segment, dict):
-            continue
-            
-        seg_type = segment.get("type", 0)
-        
-        # 处理text类型
-        if seg_type == 2:
-            text = str(segment.get("text", ""))
-            current_text += text
-            
+    for seg in segments:
+        t = seg.type
+
+        if t == SegmentType.TEXT:
+            current_text += seg.text
+
         else:
-            append_current_text()  # 遇到非text类型时先提交暂存文本
-            
-            # 处理image类型
-            if seg_type == 3:
-                url = str(segment.get("url", ""))
-                image_text = RText("[图片]")
-                image_text.set_hover_text("点击预览")
+            flush_text()
+
+            if t == SegmentType.IMAGE:
+                url = getattr(seg, "url", "")
+                summary = getattr(seg, "summary", None) or "图片"
                 if url:
-                    image_text.set_click_event(RAction.open_url, url)
-                image_text.set_color(RColor.green)
-                text_list.append(image_text)
-                
-            # 处理at类型
-            elif seg_type == 4:
-                at_names = segment.get("at_player_names", []) or []
-                if not isinstance(at_names, list):
-                    at_names = []
-                
-                user_id = str(segment.get('at_user_id', ""))
-                user_name = str(segment.get('at_user_name', ""))
-                
+                    from easybot_mcdr.impl.chat_image import to_cicode
+                    # 用纯字符串输出 CICode，确保 ChatImage 能解析
+                    server.broadcast(to_cicode(url, summary))
+                    has_cicode = True
+                else:
+                    el = RText(f"[{summary}]")
+                    el.set_color(RColor.green)
+                    text_list.append(el)
+
+            elif t == SegmentType.AT:
+                at_names = getattr(seg, "at_player_names", []) or []
+                user_id = str(getattr(seg, "at_user_id", ""))
+                user_name = str(getattr(seg, "at_user_name", ""))
+
                 if user_id == "0":
                     at_text = RText("@全体成员")
                     has_at_all = True
@@ -79,93 +110,135 @@ async def sync_message(ctx: ExecContext, data:dict, _):
                     at_text = RText(user_name)
                 else:
                     at_text = RText("@" + ",".join(at_names))
-                
+
                 at_text.set_color(RColor.gold)
                 at_text.set_hover_text(f"社交账号: {user_name}({user_id})")
-                for player in at_names:
-                    if isinstance(player, str):
-                        at_players.append(player)
+                for p in at_names:
+                    if isinstance(p, str):
+                        at_players.append(p)
                 text_list.append(at_text)
-                
-            # 处理file类型
-            elif seg_type == 5:
-                file_text = RText("[文件]")
-                file_text.set_color(RColor.green)
-                text_list.append(file_text)
-                
-            # 处理reply类型
-            elif seg_type == 6:
-                reply_text = RText("[回复某条消息]")
-                reply_text.set_color(RColor.gray)
-                text_list.append(reply_text)
 
-            # 处理 face 类型
-            elif seg_type == 7:
-                # Java版 FaceSegment: displayName
-                face_name = str(segment.get("display_name", "表情"))
-                face_text = RText(f"[{face_name}]")
-                face_text.set_color(RColor.yellow)
-                text_list.append(face_text)
-    append_current_text()
-    ServerInterface.get_instance().broadcast(text_list)
+            elif t == SegmentType.FILE:
+                el = RText("[文件]")
+                el.set_color(RColor.green)
+                text_list.append(el)
 
-    config = get_config()["events"]["message"]["on_at"]
+            elif t == SegmentType.REPLY:
+                el = RText("[回复某条消息]")
+                el.set_color(RColor.gray)
+                text_list.append(el)
+
+            elif t == SegmentType.FACE:
+                face_name = getattr(seg, "display_name", None) or "表情"
+                el = RText(f"[{face_name}]")
+                el.set_color(RColor.yellow)
+                text_list.append(el)
+
+    flush_text()
+    # 有 CICode 时，剩余部分也用纯字符串广播，保持一致性
+    if has_cicode:
+        remaining = str(text_list)
+        if remaining.strip():
+            server.broadcast(remaining)
+    else:
+        server.broadcast(text_list)
+    return at_players, has_at_all
+
+
+def _execute_at_commands(at_players, has_at_all):
+    config = get_config().get("events", {}).get("message", {}).get("on_at", {})
     logger = ServerInterface.get_instance().logger
-    # @判断
-    if config["exec_command"] and "comamnds" in config:
-        commands = config["comamnds"]
-        if not isinstance(commands, list):
-            logger.warning("命令列表格式无效，已跳过执行")
-            return
-            
-        if has_at_all:
-            for command in commands:
-                if not isinstance(command, str):
-                    continue
-                try:
-                    cmd = command.replace("#player", "@a")
-                    ServerInterface.get_instance().execute(cmd)
-                except Exception as e:
-                    logger.error(f"执行命令失败: {cmd} ({str(e)})")
-        else:
-            for player in at_players:
-                from easybot_mcdr.api.player import check_online
-                if check_online(player):
-                    for command in commands:
-                        if not isinstance(command, str):
-                            continue
-                        try:
-                            cmd = command.replace("#player", player)
-                            ServerInterface.get_instance().execute(cmd)
-                        except Exception as e:
-                            logger.error(f"执行命令失败: {cmd} ({str(e)})")
 
-    def play_sound(count, interval, sound_command, player):
-        for i in range(count):
-            logger.info(command.replace("#player", player))
-            ServerInterface.get_instance().execute(sound_command.replace("#player", player))
+    if not config.get("exec_command"):
+        return
+    commands = config.get("comamnds", [])
+    if not isinstance(commands, list):
+        logger.warning("命令列表格式无效，已跳过执行")
+        return
+
+    targets = ["@a"] if has_at_all else [
+        p for p in at_players
+        if _check_online(p)
+    ]
+
+    for player in targets:
+        for command in commands:
+            if not isinstance(command, str):
+                continue
+            try:
+                cmd = command.replace("#player", player)
+                ServerInterface.get_instance().execute(cmd)
+            except Exception as e:
+                logger.error(f"执行命令失败: {cmd} ({str(e)})")
+
+
+def _execute_at_sound(at_players, has_at_all):
+    config = get_config().get("events", {}).get("message", {}).get("on_at", {})
+    logger = ServerInterface.get_instance().logger
+    sound_cfg = config.get("sound", {})
+
+    if not sound_cfg.get("play_sound"):
+        return
+    command = sound_cfg.get("run")
+    if not isinstance(command, str):
+        logger.warning("音效命令配置无效，已跳过")
+        return
+
+    count = sound_cfg.get("count", 1)
+    interval = sound_cfg.get("interval_ms", 1000)
+
+    targets = ["@a"] if has_at_all else [
+        p for p in at_players
+        if _check_online(p)
+    ]
+
+    for player in targets:
+        for _ in range(count):
+            try:
+                ServerInterface.get_instance().execute(command.replace("#player", player))
+            except Exception as e:
+                logger.error(f"执行音效命令失败: {e}")
             time.sleep(interval / 1000)
 
-    if "sound" in config and config["sound"]["play_sound"]:
-        if "run" not in config["sound"] or not isinstance(config["sound"]["run"], str):
-            logger.warning("音效命令配置无效，已跳过")
-            return
-            
-        command = config["sound"]["run"]
-        if has_at_all:
-            play_sound(
-                config["sound"].get("count", 1),
-                config["sound"].get("interval_ms", 1000),
-                command,
-                "@a"
-            )
-        else:
-            for player in at_players:
-                from easybot_mcdr.api.player import check_online
-                if check_online(player):
-                    play_sound(
-                        config["sound"].get("count", 1),
-                        config["sound"].get("interval_ms", 1000),
-                        command,
-                        player
-                    )
+
+def _check_online(player: str) -> bool:
+    from easybot_mcdr.api.player import check_online
+    return check_online(player)
+
+
+@EasyBotWsClient.listen_exec_op("SEND_TO_CHAT")
+async def sync_message(ctx: ExecContext, data: dict, _):
+    if not isinstance(data, dict):
+        ServerInterface.get_instance().logger.error("无效的消息数据格式")
+        return
+
+    text = str(data.get("text", ""))
+
+    extra_data = data.get("extra")
+    if not isinstance(extra_data, list):
+        extra_data = []
+
+    # Replace file:// URLs with network-accessible URLs (imgbb or local server)
+    from easybot_mcdr.config import get_config as _cfg
+    img_cfg = _cfg().get("image_upload", {})
+    if img_cfg.get("enabled"):
+        from easybot_mcdr.impl.chat_image import replace_file_urls, convert_file_url
+        text = replace_file_urls(text)
+        for item in extra_data:
+            if isinstance(item, dict) and "url" in item:
+                item["url"] = convert_file_url(str(item["url"]))
+            if isinstance(item, dict) and "text" in item:
+                item["text"] = replace_file_urls(str(item["text"]))
+
+    if not extra_data:
+        ServerInterface.get_instance().broadcast(text)
+        ServerInterface.get_instance().logger.info(text)
+        return
+
+    # Flatten nested extra arrays to extract [[...]] image markers
+    flat_data = _flatten_extra(extra_data)
+    segments = segments_from_list(flat_data)
+    at_players, has_at_all = render_segments(segments, text)
+
+    _execute_at_commands(at_players, has_at_all)
+    _execute_at_sound(at_players, has_at_all)

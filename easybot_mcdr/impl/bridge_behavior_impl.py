@@ -1,8 +1,8 @@
-from typing import List
+from typing import List, Optional
 
 from mcdreforged.api.all import PluginServerInterface
 from easybot_mcdr.bridge_behavior import BridgeBehavior
-from easybot_mcdr.message import Segment, segments_to_list
+from easybot_mcdr.message import Segment
 
 
 class DefaultBridgeBehavior(BridgeBehavior):
@@ -10,21 +10,22 @@ class DefaultBridgeBehavior(BridgeBehavior):
         self.server = server
 
     def run_command(self, player_name: str, command: str, enable_papi: bool) -> str:
-        # PAPI 支持已移除，直接执行原命令
         cmd = command
-
         try:
+            # MCDR 命令 (!! 开头) 不经过 RCON, 直接通过 server.execute() 执行
+            if cmd.strip().startswith("!!"):
+                self.server.execute(cmd)
+                return "(MCDR 命令已执行)"
+            # 服务端命令优先使用 RCON 获取输出
             if self.server.is_rcon_running():
                 return str(self.server.rcon_query(cmd))
             else:
-                # fallback：直接执行命令
                 self.server.execute(cmd)
-                return "executed"
+                return "(命令已执行, RCON 未启用无法获取输出)"
         except Exception as e:
             return f"error: {e}"
 
     def papi_query(self, player_name: str, query: str) -> str:
-        # 已移除 PAPI 支持，原样返回
         return query
 
     def get_info(self):
@@ -47,16 +48,14 @@ class DefaultBridgeBehavior(BridgeBehavior):
         try:
             self.server.execute(f"kick {player} {kick_message}")
         except Exception:
-            # fallback to RCON if available
             if self.server.is_rcon_running():
                 self.server.rcon_query(f"kick {player} {kick_message}")
 
     def sync_to_chat_extra(self, segments: List[Segment], text: str):
-        # 简化：仅用文本部分输出，其余 segment 转换为字符串描述
         try:
             if segments:
-                pretty = " ".join([s.to_dict().__str__() for s in segments])
-                self.server.say(f"{text} {pretty}")
+                from easybot_mcdr.impl.message_sync import render_segments
+                render_segments(segments, text)
             else:
                 self.server.say(text)
         except Exception:
@@ -64,3 +63,56 @@ class DefaultBridgeBehavior(BridgeBehavior):
 
     def get_player_list(self):
         return list(self.server.get_online_players())
+
+    def module_is_installed(self, name: str) -> bool:
+        return False
+
+    def module_is_enabled(self, name: str) -> bool:
+        return False
+
+    def is_authenticated(self, name: str) -> bool:
+        return False
+
+    def get_player_skin(self, player_name: str) -> Optional[dict]:
+        from easybot_mcdr.impl.get_server_info import get_online_mode, get_skins_restorer
+        online = get_online_mode()
+        has_sr = get_skins_restorer()
+
+        skin_url = None
+        cape_url = None
+
+        if online or has_sr:
+            skin_url = f"https://mineskin.eu/download/{player_name}"
+        else:
+            # 离线模式无皮肤站: 查询 Mojang 判断是否正版
+            from easybot_mcdr.impl.player_list import _check_premium_sync
+            if _check_premium_sync(player_name):
+                skin_url = f"https://mineskin.eu/download/{player_name}"
+            else:
+                # 非正版: 尝试通过 UUID 获取头像
+                try:
+                    players = self.server.get_online_players()
+                    for p in players:
+                        if hasattr(p, 'name') and p.name == player_name:
+                            skin_url = f"https://mc-heads.net/skin/{p.uuid}"
+                            break
+                        if str(p) == player_name:
+                            skin_url = f"https://mc-heads.net/skin/{p.uuid}"
+                            break
+                except Exception:
+                    pass
+
+        if skin_url:
+            return {"skin_url": skin_url, "cape_url": cape_url}
+        return None
+
+    def read_nbt_data(self, player_uuid: str, data_type: int) -> Optional[dict]:
+        """
+        读取玩家 NBT 数据
+        data_type: 0=PlayerData, 1=Advancements, 2=Statistics
+        """
+        from easybot_mcdr.behavior_impl import get_player_data_getter
+        getter = get_player_data_getter()
+        if getter is None:
+            return None
+        return getter.read_nbt_data(player_uuid, data_type)

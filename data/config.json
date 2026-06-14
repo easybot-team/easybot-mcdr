@@ -4,6 +4,9 @@
     "server_name": "server_name",
     "debug": false,
     "kick_delay_seconds": 5,
+    "handler": {
+        "enabled": true
+    },
     "message_sync": {
         "ignore_mcdr_command": true
     },
@@ -43,5 +46,9 @@
     "bot_filter": {
         "enabled": true,
         "prefixes": ["Bot_", "BOT_", "bot_"]
+    },
+    "image_upload": {
+        "enabled": false,
+        "imgbb_api_key": ""
     }
 }

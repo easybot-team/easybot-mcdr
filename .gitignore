@@ -6,3 +6,5 @@ __pycache__/
 *.pyi
 __temp
 .idea
+.pytest_cache/
+*.egg-info/

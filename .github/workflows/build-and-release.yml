@@ -2,10 +2,9 @@ name: Build and Release EasyBot-MCDR
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v*'
   workflow_dispatch:
-    # 允许手动触发工作流
     inputs:
       version:
         description: '手动指定版本号（可选）'
@@ -37,8 +36,124 @@ jobs:
       - name: 安装MCDReforged
         run: pip install mcdreforged>=2.14
 
+      - name: 安装测试依赖
+        run: pip install pytest pytest-asyncio>=1.0.0 -q
+
+      - name: 运行插件测试
+        id: plugin_test
+        run: |
+          pytest tests/test_plugin.py -v --tb=short 2>&1 | tee /tmp/test-output.txt
+          echo "TEST_EXIT_CODE=$?" >> $GITHUB_ENV
+        continue-on-error: true
+
+      - name: 生成测试报告
+        if: always()
+        run: |
+          # 获取版本号
+          PLUGIN_VERSION=$(grep -o '"version": "[^"]*"' mcdreforged.plugin.json | sed 's/"version": "\([^"]*\)"/\1/')
+          PLUGIN_VERSION=${PLUGIN_VERSION:-"未知"}
+          PYTHON_VERSION=$(python --version | awk '{print $2}')
+          RUN_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          # 统计结果
+          TOTAL=$(grep -c -E "PASSED|FAILED|ERROR" /tmp/test-output.txt || true)
+          PASSED=$(grep -c "PASSED" /tmp/test-output.txt || true)
+          FAILED=$(grep -c "FAILED" /tmp/test-output.txt || true)
+
+          # 确保变量是数字（默认为0）
+          TOTAL=${TOTAL:-0}
+          PASSED=${PASSED:-0}
+          FAILED=${FAILED:-0}
+
+          # 计算通过率
+          if [ "$TOTAL" -gt "0" ]; then
+            PASS_RATE=$(echo "scale=1; $PASSED * 100 / $TOTAL" | bc)
+          else
+            PASS_RATE="0.0"
+          fi
+
+          echo "TEST_PASSED=$PASSED" >> $GITHUB_ENV
+          echo "TEST_FAILED=$FAILED" >> $GITHUB_ENV
+          echo "TEST_TOTAL=$TOTAL" >> $GITHUB_ENV
+          echo "TEST_PASS_RATE=$PASS_RATE" >> $GITHUB_ENV
+
+          if [ "$FAILED" -gt "0" ] 2>/dev/null; then
+            echo "TEST_STATUS=❌ $FAILED 项失败" >> $GITHUB_ENV
+          else
+            echo "TEST_STATUS=✅ 全部通过" >> $GITHUB_ENV
+          fi
+
+          # 生成 Step Summary 报告
+          echo "## EasyBot-MCDR 测试报告" >> $GITHUB_STEP_SUMMARY
+          echo "插件版本: $PLUGIN_VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "Python: $PYTHON_VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "运行平台: linux" >> $GITHUB_STEP_SUMMARY
+          echo "测试时间: $RUN_TIME" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 概览" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 指标 | 结果 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 总计 | $TOTAL |" >> $GITHUB_STEP_SUMMARY
+          echo "| 通过 | $PASSED |" >> $GITHUB_STEP_SUMMARY
+          echo "| 失败 | $FAILED |" >> $GITHUB_STEP_SUMMARY
+          echo "| 通过率 | ${PASS_RATE}% |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 测试详情" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| # | 测试项 | 结果 | 耗时 |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|--------|------|------|" >> $GITHUB_STEP_SUMMARY
+
+          # 解析测试输出，生成详细表格
+          TEST_NUM=0
+          while IFS= read -r line; do
+            if echo "$line" | grep -qE "(PASSED|FAILED|ERROR)"; then
+              TEST_NUM=$((TEST_NUM + 1))
+              # 提取测试名称和结果
+              TEST_NAME=$(echo "$line" | sed 's/.*:://' | sed 's/ PASSED.*//' | sed 's/ FAILED.*//' | sed 's/ ERROR.*//')
+              TEST_TIME=$(echo "$line" | grep -oP '[\d.]+s$' || echo "0.000s")
+
+              if echo "$line" | grep -q "PASSED"; then
+                TEST_RESULT="✅ 通过"
+              elif echo "$line" | grep -q "FAILED"; then
+                TEST_RESULT="❌ 失败"
+              else
+                TEST_RESULT="⚠️ 错误"
+              fi
+
+              echo "| $TEST_NUM | $TEST_NAME | $TEST_RESULT | $TEST_TIME |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done < /tmp/test-output.txt
+
       - name: 使用MCDReforged打包插件
         run: mcdreforged pack
+
+      - name: 代码质量检查
+        id: quality_check
+        run: |
+          pip install ruff pip-audit -q
+          echo "## 代码质量检查" >> $GITHUB_STEP_SUMMARY
+
+          # Ruff 检查
+          if ruff check . 2>&1 | tee /tmp/ruff-result.txt; then
+            echo "RUFF_STATUS=✅ 通过" >> $GITHUB_ENV
+          else
+            echo "RUFF_STATUS=❌ 发现问题" >> $GITHUB_ENV
+          fi
+
+          # 依赖安全检查
+          if pip-audit -r requirements.txt 2>&1 | tee /tmp/audit-result.txt; then
+            echo "AUDIT_STATUS=✅ 通过" >> $GITHUB_ENV
+          else
+            echo "AUDIT_STATUS=❌ 发现问题" >> $GITHUB_ENV
+          fi
+
+          echo "| 检查项 | 状态 |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Ruff 代码检查 | ${{ env.RUFF_STATUS }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 依赖安全 | ${{ env.AUDIT_STATUS }} |" >> $GITHUB_STEP_SUMMARY
 
       - name: 获取版本号
         id: get_version
@@ -67,7 +182,7 @@ jobs:
             ${{ env.MCDR_PATH }}
 
       - name: 发布到GitHub Release
-        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           # 如果是标签推送，使用标签作为版本号
@@ -75,11 +190,25 @@ jobs:
           name: EasyBot-MCDR ${{ env.VERSION || 'Development Build' }}
           body: |
             ## EasyBot-MCDR ${{ env.VERSION || 'Development Build' }}
-            
+
             ### 版本信息
             - 插件版本: ${{ env.VERSION || 'Development Build' }}
             - MCDReforged: >= 2.14
-            
+
+            ### 测试结果
+            | 指标 | 结果 |
+            |------|------|
+            | 测试状态 | ${{ env.TEST_STATUS }} |
+            | 总计 | ${{ env.TEST_TOTAL }} |
+            | 通过 | ✅ ${{ env.TEST_PASSED }} |
+            | 失败 | ❌ ${{ env.TEST_FAILED }} |
+
+            ### 代码质量
+            | 检查项 | 状态 |
+            |--------|------|
+            | Ruff 代码检查 | ${{ env.RUFF_STATUS }} |
+            | 依赖安全 | ${{ env.AUDIT_STATUS }} |
+
             ### 更新内容
           draft: false
           prerelease: contains('${{ env.VERSION }}', 'beta') || contains('${{ env.VERSION }}', 'alpha')

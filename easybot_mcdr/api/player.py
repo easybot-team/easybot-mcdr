@@ -126,12 +126,12 @@ def update_player_uuid(player: str, new_uuid: str):
 
 def on_player_joined(server, player, info: Info):
     logger = ServerInterface.get_instance().logger
-    
+
     # Skip bot players
     if is_bot_player(player):
         logger.info(f"检测到假人玩家 {player}，跳过数据处理")
         return
-    
+
     # 统一的UUID获取逻辑
     uuid = uuid_map.get(player)
     if uuid is None:
@@ -146,23 +146,22 @@ def on_player_joined(server, player, info: Info):
                 uuid = generate_offline_uuid(player)  # 降级到离线UUID
         else:
             uuid = generate_offline_uuid(player)  # 离线模式直接生成UUID
-        
+
         # 更新UUID映射
         update_player_uuid(player, uuid)
-    
+
     # 获取IP地址
     ip = "127.0.0.1"
     if match := re.search(r'\d+\.\d+\.\d+\.\d+', info.raw_content):
         ip = match.group()
-    
+
     player_info = PlayerInfo(ip, player, uuid)
     online_players[player] = player_info
     cached_data[player] = player_info
-    
+
     logger.info(f"玩家 {player} 加入成功: UUID={uuid}, IP={ip}")
 
 def build_player_info(player: str):
-    logger = ServerInterface.get_instance().logger
     if not check_cache(player):
         if player in online_players:
             return {
@@ -172,8 +171,8 @@ def build_player_info(player: str):
                 "skin_url": "",
                 "bedrock": False
             }
-        logger.warning(f"玩家 {player} 未在线或无缓存数据")
         return None
+
     return {
         "player_name": player,
         "player_uuid": cached_data[player].uuid,
