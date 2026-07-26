@@ -10,6 +10,11 @@ class DefaultBridgeBehavior(BridgeBehavior):
         self.server = server
 
     def run_command(self, player_name: str, command: str, enable_papi: bool) -> str:
+        """
+        执行命令。MCDR 端的 PAPI 替换由 impl/papi.py 负责（仅 Bukkit + RCON 时可用），
+        此处不处理 PAPI；enable_papi 参数仅用于日志提示。
+        实际的 RUN_COMMAND RPC 由 impl/exec_command.py 处理，本方法仅供 behavior 接口调用。
+        """
         cmd = command
         try:
             # MCDR 命令 (!! 开头) 不经过 RCON, 直接通过 server.execute() 执行
@@ -26,7 +31,13 @@ class DefaultBridgeBehavior(BridgeBehavior):
             return f"error: {e}"
 
     def papi_query(self, player_name: str, query: str) -> str:
-        return query
+        """
+        PAPI 查询。MCDR 环境下 PAPI 仅在 Bukkit 系列服务端 + RCON 可用时支持，
+        实际逻辑在 impl/papi.py 中实现。此方法作为 behavior 接口的同步入口，
+        委托给 impl/papi.py 的 run_placeholder_blocking。
+        """
+        from easybot_mcdr.impl.papi import run_placeholder_blocking
+        return run_placeholder_blocking(player_name, query)
 
     def get_info(self):
         info = self.server.get_server_information()
@@ -65,10 +76,16 @@ class DefaultBridgeBehavior(BridgeBehavior):
         return list(self.server.get_online_players())
 
     def module_is_installed(self, name: str) -> bool:
-        return False
+        """检查 MCDR 插件是否已安装（按名称模糊匹配）"""
+        try:
+            plugin_list = self.server.get_plugin_list()
+            return any(name.lower() in p.lower() for p in plugin_list)
+        except Exception:
+            return False
 
     def module_is_enabled(self, name: str) -> bool:
-        return False
+        """MCDR 无独立启停概念，已安装即视为已启用"""
+        return self.module_is_installed(name)
 
     def is_authenticated(self, name: str) -> bool:
         return False
@@ -116,3 +133,22 @@ class DefaultBridgeBehavior(BridgeBehavior):
         if getter is None:
             return None
         return getter.read_nbt_data(player_uuid, data_type)
+
+    def on_cross_bind_notify(self, player_name: str, code: str, target_platform: str, origin_platform: str) -> None:
+        """跨平台绑定通知：在游戏内向玩家发送确认提示。"""
+        try:
+            self.server.logger.info(
+                f"[EasyBot] 跨平台绑定通知: 玩家={player_name}, "
+                f"目标平台={target_platform}, 原平台={origin_platform}"
+            )
+            self.server.tell(player_name, "§e[EasyBot] §a检测到跨平台绑定请求!")
+            self.server.tell(
+                player_name,
+                f"§e[EasyBot] §f你已在 §b{origin_platform} §f绑定，现要绑定 §b{target_platform}",
+            )
+            self.server.tell(
+                player_name,
+                f"§e[EasyBot] §f请在游戏内输入: §a!!ez confirm {code} §f完成确认",
+            )
+        except Exception as e:
+            self.server.logger.warning(f"[EasyBot] 发送跨平台绑定提示失败: {e}")

@@ -42,3 +42,8 @@ class BridgeBehavior(Protocol):
 
     def read_nbt_data(self, player_uuid: str, data_type: int) -> Optional[dict]:
         ...
+
+    def on_cross_bind_notify(self, player_name: str, code: str, target_platform: str, origin_platform: str) -> None:
+        """跨平台绑定通知：玩家已在 origin_platform 绑定，现要在 target_platform 绑定。
+        通常在游戏内提示玩家输入 !!ez confirm <code> 完成确认。"""
+        ...

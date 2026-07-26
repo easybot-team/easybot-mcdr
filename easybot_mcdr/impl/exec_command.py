@@ -57,7 +57,7 @@ async def run_command(ctx, data, session_info):
     # Placeholder 变量替换
     if data.get("enable_papi"):
         from easybot_mcdr.impl.papi import run_placeholder
-        command = await run_placeholder(command, data["player_name"])
+        command = await run_placeholder(data["player_name"], command)
 
     try:
         if _is_mcdr_command(command):

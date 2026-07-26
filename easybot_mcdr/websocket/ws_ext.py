@@ -72,5 +72,11 @@ class ExtendedEasyBotWsClient(EasyBotWsClient):
         # 事件分发
         await self.event_bus.emit("raw_packet", message=message, data=data)
         if op == 3:
-            # 身份验证成功
+            # 身份验证成功：连接已完全建立，对应 bridge 的 BridgeOnlineAsyncEvent
             await self.event_bus.emit("identified", session_info=self._session_info, data=data)
+            await self.event_bus.emit(
+                "online",
+                session_info=self._session_info,
+                data=data,
+                host_info=getattr(self._session_info, "_host_info", None),
+            )

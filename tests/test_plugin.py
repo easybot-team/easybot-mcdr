@@ -265,8 +265,13 @@ def test_rpc_decorator_registration():
 def test_rpc_expected_ops():
     import easybot_mcdr.impl.rpc_handlers
     from easybot_mcdr.rpc import _registry
-    expected = {"PING", "RUN_COMMAND", "KICK_PLAYER",
-                "SYNC_CHAT", "GET_PLAYER_LIST", "SYNC_SEGMENTS"}
+    # rpc_handlers.py 只保留没有独立 impl 模块的 RPC；
+    # SEND_TO_CHAT / PLACEHOLDER_API_QUERY / UN_BIND_NOTIFY /
+    # BIND_SUCCESS_NOTIFY / PLAYER_LIST / GET_SERVER_INFO / RUN_COMMAND
+    # 均在 impl/ 下的独立模块中注册
+    expected = {"PING", "GET_EXTENSIONS", "MODULE_INSTALLED",
+                "MODULE_ENABLED", "IS_AUTHENTICATED",
+                "GET_PLAYER_SKIN", "READ_NBT_DATA"}
     registered = set(_registry.keys())
     missing = expected - registered
     assert not missing, f"缺少 RPC 处理器: {missing}"

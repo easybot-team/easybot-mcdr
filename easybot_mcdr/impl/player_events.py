@@ -136,8 +136,9 @@ async def on_info(server, info: Info):
         uuid = match.group(2).lower()
 
         if not is_bot_player(name):
-            from easybot_mcdr.api.player import update_player_uuid
+            from easybot_mcdr.api.player import update_player_uuid, register_session
             update_player_uuid(name, uuid)
+            register_session(name, uuid)
             server.logger.info(f"从服务器获取到玩家 {name} 的正版UUID: {uuid}")
         return
 
@@ -150,12 +151,13 @@ async def on_info(server, info: Info):
             server.logger.info(f"检测到假人 {name}，跳过UUID处理")
             return
 
-        from easybot_mcdr.api.player import uuid_map, generate_offline_uuid, update_player_uuid, online_players, cached_data, PlayerInfo
+        from easybot_mcdr.api.player import uuid_map, generate_offline_uuid, update_player_uuid, online_players, cached_data, PlayerInfo, register_session
         from easybot_mcdr.impl.get_server_info import get_online_mode
 
         current_uuid = uuid_map.get(name)
         if not current_uuid or current_uuid == "unknown":
             if not get_online_mode():
+                # 离线模式：严格用 join 日志里的真实名生成 UUID，绝不使用聊天解析名
                 correct_uuid = generate_offline_uuid(name)
                 update_player_uuid(name, correct_uuid)
                 server.logger.info(f"修正玩家 {name} 的离线UUID: {correct_uuid}")
@@ -167,6 +169,10 @@ async def on_info(server, info: Info):
             if name not in online_players:
                 online_players[name] = PlayerInfo(ip, name, uuid_map.get(name, "unknown"))
             cached_data[name] = online_players[name]
+            # 注册 UUID 锚点 session，确保 fallback 路径也能建立身份锚点
+            final_uuid = uuid_map.get(name, "unknown")
+            if final_uuid and final_uuid != "unknown":
+                register_session(name, final_uuid)
         except Exception as e:
             server.logger.warning(f"写入玩家 {name} 本地缓存失败: {e}")
 

@@ -22,6 +22,7 @@ class SessionInfo:
         self.token = token
         self.interval = interval
         self.server_name = None
+        self.support_get_plugin_list = False
 
     @staticmethod
     def from_dict(data: dict):
@@ -58,6 +59,9 @@ class SessionInfo:
     def get_server_name(self):
         return self.server_name
 
+    def get_support_get_plugin_list(self):
+        return self.support_get_plugin_list
+
 
 class EasyBotWsClient:
     _listeners = defaultdict(list)
@@ -77,8 +81,10 @@ class EasyBotWsClient:
         self._ws = None
         self._active = False
         self._manual_stop = False
-        self._reconnect_delay = 5
-        self._max_reconnect_attempts = 30
+        # 指数退避重连：1s 起步，每次 ×2，封顶 60s，永不放弃
+        self._reconnect_delay = 1
+        self._reconnect_min_delay = 1
+        self._reconnect_max_delay = 60
         self._reconnect_attempts = 0
         self._session_info = None
         self._heartbeat_task = None
@@ -173,42 +179,58 @@ class EasyBotWsClient:
     async def _connection_manager(self):
         try:
             while self._active:
-                if self._reconnect_attempts >= self._max_reconnect_attempts:
-                    try:
-                        ServerInterface.get_instance().logger.warning(
-                            f"[EasyBot] 已达到最大重连次数({self._max_reconnect_attempts}次)，停止重连")
-                    except Exception:
-                        pass
-                    self._active = False
-                    break
-
+                # 只要不是首次连接，都按退避延迟重连，避免鉴权失败后无延迟狂刷
                 if self._reconnect_attempts > 0:
+                    delay = min(self._reconnect_delay, self._reconnect_max_delay)
                     try:
                         ServerInterface.get_instance().logger.info(
-                            f"[EasyBot] {self._reconnect_delay}秒后尝试重连 "
-                            f"(第{self._reconnect_attempts}次/共{self._max_reconnect_attempts}次)")
+                            f"[EasyBot] {delay}秒后尝试重连 "
+                            f"(第{self._reconnect_attempts}次)")
                     except Exception:
                         pass
-                    await asyncio.sleep(self._reconnect_delay)
+                    await asyncio.sleep(delay)
 
                 try:
                     async with websockets.connect(self.ws_url) as websocket:
                         self._ws = websocket
+                        # 连接成功：重置退避，回到最小延迟
                         self._reconnect_attempts = 0
+                        self._reconnect_delay = self._reconnect_min_delay
                         await self.on_open()
                         await self._message_pump()
+                        # _message_pump 正常返回说明连接已断开（可能是鉴权失败、
+                        # 服务端主动关闭等），需要计入失败并触发退避，否则会无延迟狂重连
+                        self._reconnect_attempts += 1
+                        self._reconnect_delay = min(
+                            self._reconnect_delay * 2, self._reconnect_max_delay
+                        )
+                        try:
+                            ServerInterface.get_instance().logger.warning(
+                                f"[EasyBot] 连接已断开，下次重连间隔 "
+                                f"{min(self._reconnect_delay, self._reconnect_max_delay)}秒")
+                        except Exception:
+                            pass
                 except (ConnectionRefusedError, ConnectionClosedError):
                     self._reconnect_attempts += 1
+                    # 指数退避：每次翻倍，封顶 max_delay，永不放弃
+                    self._reconnect_delay = min(
+                        self._reconnect_delay * 2, self._reconnect_max_delay
+                    )
                     try:
                         ServerInterface.get_instance().logger.warning(
-                            f"[EasyBot] 连接失败 (第{self._reconnect_attempts}次/共{self._max_reconnect_attempts}次)")
+                            f"[EasyBot] 连接失败 (第{self._reconnect_attempts}次)，"
+                            f"下次重连间隔 {min(self._reconnect_delay, self._reconnect_max_delay)}秒")
                     except Exception:
                         pass
                 except Exception as e:
                     self._reconnect_attempts += 1
+                    self._reconnect_delay = min(
+                        self._reconnect_delay * 2, self._reconnect_max_delay
+                    )
                     try:
                         ServerInterface.get_instance().logger.warning(
-                            f"[EasyBot] 连接异常: {type(e).__name__}")
+                            f"[EasyBot] 连接异常: {type(e).__name__}，"
+                            f"下次重连间隔 {min(self._reconnect_delay, self._reconnect_max_delay)}秒")
                     except Exception:
                         pass
         finally:
@@ -272,6 +294,8 @@ class EasyBotWsClient:
                 }))
             elif op == 3:
                 self._session_info.set_server_name(data["server_name"])
+                # 捕获主程序是否支持获取插件列表（对应 bridge 的 IdentifySuccessPacket.supportGetPluginList）
+                self._session_info.support_get_plugin_list = data.get("support_get_plugin_list", False)
                 server.logger.info(f"[EasyBot] 身份验证成功... [{data['server_name']}]")
                 await self.start_update_sync_settings()
                 if self._session_info is not None:
@@ -454,3 +478,20 @@ class EasyBotWsClient:
         return await self.send_and_wait("GET_BIND_INFO", {
             "player_name": player_name
         })
+
+    async def confirm_bind(self, player_name: str, code: str):
+        """确认跨平台绑定，玩家在游戏内输入确认码后调用"""
+        return await self.send_and_wait("CONFIRM_BIND", {
+            "player_name": player_name,
+            "code": code
+        })
+
+    async def query_bind_status(self, player_name: str):
+        """查询玩家在所有平台的绑定状态"""
+        return await self.send_and_wait("QUERY_BIND_STATUS", {
+            "player_name": player_name
+        })
+
+    async def get_installed_plugin(self):
+        """获取主程序上已安装的插件列表"""
+        return await self.send_and_wait("INSTALLED_PLUGIN", {})

@@ -20,6 +20,12 @@ online_players = {}
 uuid_map = {}
 cached_data = {} 
 
+# UUID 锚点 session 表：uuid -> {"real_name": str, "uuid": str, "aliases": set}
+# join 时建立，left 时清除；名字只用于显示，UUID 才是匹配绑定的钥匙
+player_sessions = {}
+# 名字 -> uuid 的反查索引（包含真实名和别名），用于把改写后的名字还原回锚点
+name_to_uuid = {}
+
 def get_data_map():
     global online_players, uuid_map, cached_data
     return {
@@ -73,7 +79,9 @@ def on_stdout(server, info: Info):
 def reload_player_api(old):
     if old is not None:
         load_data_map(old)
-        
+    # 热重载后从 online_players 重建 session 锚点，保证在线玩家身份不丢
+    _rebuild_sessions_from_online()
+
 def on_server_stop(server, return_code):
     global online_players
     global uuid_map
@@ -81,6 +89,7 @@ def on_server_stop(server, return_code):
     online_players = {}
     uuid_map = {}
     cached_data = {}
+    clear_sessions()
 
 
 def is_bot_player(player: str) -> bool:
@@ -124,6 +133,107 @@ def update_player_uuid(player: str, new_uuid: str):
     if old_uuid != new_uuid:
         logger.info(f"玩家 {player} 的UUID已更新: {old_uuid} -> {new_uuid}")
 
+
+# ==================== UUID 锚点 session 管理 ====================
+
+def register_session(real_name: str, uuid: str):
+    """join 时建立 UUID 锚点 session。真实名 + UUID 一经锚定，后续显示名变化不影响匹配。"""
+    global player_sessions, name_to_uuid
+    if not real_name or not uuid or uuid == "unknown":
+        return
+    uuid = uuid.lower()
+    session = {
+        "real_name": real_name,
+        "uuid": uuid,
+        "aliases": set()
+    }
+    player_sessions[uuid] = session
+    name_to_uuid[real_name] = uuid
+
+def remove_session(uuid: str):
+    """left 时清除 session 及其名字索引"""
+    global player_sessions, name_to_uuid
+    if not uuid:
+        return
+    uuid = uuid.lower()
+    session = player_sessions.pop(uuid, None)
+    if session is None:
+        return
+    name_to_uuid.pop(session["real_name"], None)
+    for alias in session["aliases"]:
+        if name_to_uuid.get(alias) == uuid:
+            name_to_uuid.pop(alias, None)
+
+def add_alias(uuid: str, alias: str):
+    """记录某个 UUID 的别名（模组改写后的显示名），用于反查还原"""
+    global player_sessions, name_to_uuid
+    if not alias:
+        return
+    uuid = uuid.lower() if uuid else ""
+    alias = alias.strip()
+    if not alias or not uuid or uuid not in player_sessions:
+        return
+    session = player_sessions[uuid]
+    if alias == session["real_name"]:
+        return
+    session["aliases"].add(alias)
+    if alias not in name_to_uuid:
+        name_to_uuid[alias] = uuid
+
+def resolve_player(raw_name: str):
+    """
+    反查：把任意名字（含模组改写后的显示名）还原为 join 时锚定的真实名和 UUID。
+    返回 (real_name, uuid)；查不到返回 (raw_name, None)。
+    这是让插件对任意改名方式免疫的核心。
+    """
+    if not raw_name:
+        return (raw_name, None)
+    raw = raw_name.strip()
+    if not raw:
+        return (raw_name, None)
+    # 1. 名字索引精确命中（真实名或已记录别名）
+    uuid = name_to_uuid.get(raw)
+    if uuid and uuid in player_sessions:
+        return (player_sessions[uuid]["real_name"], uuid)
+    # 2. 在线玩家精确匹配
+    if raw in online_players:
+        u = online_players[raw].uuid
+        if u and u != "unknown":
+            return (raw, u)
+    # 3. 子串匹配：改写后的名字通常包含真实名（如 [VIP]Steve 含 Steve）
+    for online_name in online_players:
+        if online_name and len(online_name) >= 2 and online_name in raw:
+            u = online_players[online_name].uuid
+            if u and u != "unknown":
+                return (online_name, u)
+    # 4. 反向子串：真实名包含解析名（少见，兜底）
+    for online_name in online_players:
+        if raw and len(raw) >= 2 and raw in online_name:
+            u = online_players[online_name].uuid
+            if u and u != "unknown":
+                return (online_name, u)
+    # 5. 查不到，返回原名与空 UUID
+    return (raw, None)
+
+def get_session_by_uuid(uuid: str):
+    uuid = uuid.lower() if uuid else ""
+    return player_sessions.get(uuid)
+
+def _rebuild_sessions_from_online():
+    """从 online_players 重建 session 锚点（用于热重载后恢复在线玩家锚点）"""
+    global player_sessions, name_to_uuid
+    player_sessions = {}
+    name_to_uuid = {}
+    for name, info in online_players.items():
+        if info.uuid and info.uuid != "unknown":
+            register_session(name, info.uuid)
+
+def clear_sessions():
+    """服务器停止时清空所有 session"""
+    global player_sessions, name_to_uuid
+    player_sessions = {}
+    name_to_uuid = {}
+
 def on_player_joined(server, player, info: Info):
     logger = ServerInterface.get_instance().logger
 
@@ -159,15 +269,29 @@ def on_player_joined(server, player, info: Info):
     online_players[player] = player_info
     cached_data[player] = player_info
 
+    # 建立 UUID 锚点 session：真实名 + UUID 一经锚定，后续显示名变化不影响匹配
+    register_session(player, uuid)
+
     logger.info(f"玩家 {player} 加入成功: UUID={uuid}, IP={ip}")
 
 def build_player_info(player: str):
+    # 先尝试直接命中缓存/在线表
     if not check_cache(player):
         if player in online_players:
             return {
                 "player_name": player,
                 "player_uuid": online_players[player].uuid,
                 "ip": online_players[player].ip,
+                "skin_url": "",
+                "bedrock": False
+            }
+        # 直接命中失败：通过 UUID 锚点 session 反查真实名
+        real_name, uuid = resolve_player(player)
+        if uuid and real_name in online_players:
+            return {
+                "player_name": real_name,
+                "player_uuid": uuid,
+                "ip": online_players[real_name].ip,
                 "skin_url": "",
                 "bedrock": False
             }
@@ -186,7 +310,11 @@ def on_player_left(server, player):
     if is_bot_player(player):
         logger.info(f"检测到假人玩家 {player} 退出，跳过数据处理")
         return
-        
+
+    # 先按真实名取 UUID 清除 session，再移除在线记录
+    info = online_players.get(player)
+    if info and info.uuid:
+        remove_session(info.uuid)
     if player in online_players:
         online_players.pop(player)
 

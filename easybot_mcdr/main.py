@@ -2,7 +2,6 @@ from mcdreforged.api.all import *
 import websockets
 from easybot_mcdr.api.player import get_data_map, init_player_api
 from easybot_mcdr.config import get_config, load_config, save_config
-from easybot_mcdr.utils import is_white_list_enable
 from easybot_mcdr.websocket.ws_ext import ExtendedEasyBotWsClient as EasyBotWsClient
 from easybot_mcdr.impl.get_server_info import get_online_mode
 import easybot_mcdr.impl.cross_server_chat
@@ -26,6 +25,7 @@ kick_map = {}
 from easybot_mcdr.meta import get_plugin_version
 from easybot_mcdr.rpc import bind_registered_handlers
 import easybot_mcdr.impl.rpc_handlers  # 注册 bridge_rpc 处理器
+import easybot_mcdr.impl.cross_bind_notify  # 注册 CROSS_BIND_NOTIFY 监听器
 
 help_msg = '''--------§a EasyBot §r(版本: §e{0}§r)--------
 §b!!ez help §f- §c显示帮助菜单
@@ -34,10 +34,11 @@ help_msg = '''--------§a EasyBot §r(版本: §e{0}§r)--------
 §c绑定类
 §b!!ez bind §f- §c触发绑定
 §b!!bind §f- §c同上
+§b!!ez confirm <code> §f- §c确认跨平台绑定
+§b!!ez bindstatus §f- §c查询绑定状态
 
 §c消息发送类
 §b!!ez say <message> §f- §c发送消息
-§b!!esay <message> §f- §c同上
 §b!!say <message> §f- §c同上
 
 §cRCON配置(需MCDR 3级权限及以上)
@@ -51,6 +52,7 @@ help_msg = '''--------§a EasyBot §r(版本: §e{0}§r)--------
 §b!!ez bot list §f- §c显示假人过滤前缀列表
 
 §c插件信息
+§b!!ez plugins §f- §c获取主程序已安装的插件列表
 §b!!ez §f- §c显示插件详情
 ---------------------------------------------'''.format(get_plugin_version())
 
@@ -273,8 +275,6 @@ def sync_online_players_with_rcon(server: PluginServerInterface, max_retries=5, 
     return False
 
 
-from easybot_mcdr.impl.rcon_auto_config import check_and_configure_rcon
-
 @new_thread("EasyBot Startup")
 def on_server_started(server: PluginServerInterface):
     """服务器启动时执行的函数"""
@@ -427,7 +427,7 @@ async def show_plugin_info(source: CommandSource):
         f'§b插件版本: §f{get_plugin_version()}',
         '§b插件名称: §fEasyBot MCDR',
         '§b功能介绍: §f跨服务器聊天、玩家数据同步、假人过滤',
-        f'§b服务器模式: §f{'正版' if get_online_mode() else '离线'}模式',
+        f"§b服务器模式: §f{'正版' if get_online_mode() else '离线'}模式",
         '§b使用帮助: §f!!ez help',
         '---------------------------------------------'
     ]
@@ -641,6 +641,7 @@ def register_commands(server: PluginServerInterface):
     # 定义参数
     builder.arg("message", Text)  
     builder.arg("prefix", Text)   
+    builder.arg("code", Text)
 
     # 注册命令
     builder.command("!!ez help", show_help)
@@ -648,9 +649,10 @@ def register_commands(server: PluginServerInterface):
     builder.command("!!ez reload", reload)
     builder.command("!!ez bind", bind)
     builder.command("!!bind", bind)
-    builder.command("!!say <message>", say)
-    builder.command("!!esay <message>", say)
+    builder.command("!!ez confirm <code>", confirm_bind_cmd)
+    builder.command("!!ez bindstatus", bindstatus_cmd)
     builder.command("!!ez say <message>", say)
+    builder.command("!!say <message>", say)
 
     # RCON 配置命令
     builder.command("!!ez rcon auto", rcon_auto)
@@ -661,6 +663,9 @@ def register_commands(server: PluginServerInterface):
     builder.command("!!ez bot add <prefix>", add_bot_prefix)
     builder.command("!!ez bot remove <prefix>", remove_bot_prefix)
     builder.command("!!ez bot list", list_bot_prefixes)
+
+    # 插件信息命令
+    builder.command("!!ez plugins", plugins_cmd)
     
     # 注册到服务器
     builder.register(server)
@@ -685,6 +690,126 @@ async def bind(source: CommandSource):
         source.reply(
             f"§c你已经绑定了账号, ({bind_data['name']}/{bind_data['uuid']}/时间:{bind_data['time']}/{bind_data['platform']})"
         )
+
+
+async def confirm_bind_cmd(source: CommandSource, context: CommandContext):
+    """确认跨平台绑定：玩家在游戏内输入 !!ez confirm <code>"""
+    if source.is_console:
+        source.reply("§c这个命令不能在控制台使用!")
+        return
+
+    if wsc is None:
+        source.reply("§cWebSocket 未连接，无法确认绑定!")
+        return
+
+    code = context["code"]
+    if not code:
+        source.reply("§c请提供确认码: !!ez confirm <code>")
+        return
+
+    try:
+        result = await wsc.confirm_bind(source.player, code)
+    except Exception as e:
+        source.reply(f"§c确认绑定请求失败: {e}")
+        return
+
+    if not result:
+        source.reply("§c确认绑定失败: 服务端无响应!")
+        return
+
+    success = result.get("success", False)
+    message = result.get("message", "")
+    bound_platforms = result.get("bound_platforms", "")
+
+    if success:
+        source.reply(f"§a{message or '跨平台绑定成功!'}")
+        if bound_platforms:
+            source.reply(f"§a已绑定平台: §f{bound_platforms}")
+    else:
+        source.reply(f"§c{message or '确认绑定失败!'}")
+
+
+async def bindstatus_cmd(source: CommandSource):
+    """查询当前玩家在所有平台的绑定状态"""
+    if source.is_console:
+        source.reply("§c这个命令不能在控制台使用!")
+        return
+
+    if wsc is None:
+        source.reply("§cWebSocket 未连接，无法查询绑定状态!")
+        return
+
+    try:
+        result = await wsc.query_bind_status(source.player)
+    except Exception as e:
+        source.reply(f"§c查询绑定状态失败: {e}")
+        return
+
+    if not result:
+        source.reply("§c查询失败: 服务端无响应!")
+        return
+
+    is_bound = result.get("is_bound", False)
+    social_accounts = result.get("social_accounts", []) or []
+
+    source.reply("--------§a 绑定状态 §r--------")
+    if not is_bound or not social_accounts:
+        source.reply("§e你还未绑定任何社交平台账号")
+        source.reply("§f使用 §b!!ez bind §f开始绑定")
+    else:
+        source.reply(f"§b已绑定 §a{len(social_accounts)} §b个平台:")
+        for acc in social_accounts:
+            platform = acc.get("platform", "?")
+            name = acc.get("name", "?")
+            uid = acc.get("uuid", "?")
+            source.reply(f"§b- §f[{platform}] §a{name} §7({uid})")
+    source.reply("---------------------------------------------")
+
+
+async def plugins_cmd(source: CommandSource):
+    """获取主程序上已安装的插件列表（需管理员权限）"""
+    if not source.has_permission(3):
+        source.reply("§c你没有权限使用这个命令!")
+        return
+
+    if wsc is None:
+        source.reply("§cWebSocket 未连接，无法获取插件列表!")
+        return
+
+    # 检查主程序是否支持获取插件列表（对应 bridge 的 supportGetPluginList 检查）
+    if wsc._session_info is None or not wsc._session_info.get_support_get_plugin_list():
+        source.reply("§c主程序版本过旧，不支持获取插件列表! 请升级到 dev11 及以上版本。")
+        return
+
+    try:
+        result = await wsc.get_installed_plugin()
+    except Exception as e:
+        source.reply(f"§c获取插件列表失败: {e}")
+        return
+
+    if not result:
+        source.reply("§c获取失败: 服务端无响应!")
+        return
+
+    # 主程序的 INSTALLED_PLUGIN 回调只返回 plugins 字段，没有 success 字段
+    # （对应 bridge 的 GetInstalledPluginResultPacket，只有 plugins 一个字段）
+    plugins = result.get("plugins", {}) or {}
+    source.reply("--------§a 主程序已安装插件 §r--------")
+    if not plugins:
+        source.reply("§e未获取到任何插件信息")
+    else:
+        for identifier, info in plugins.items():
+            # PluginInfo 结构: enabled / manifest{name,version,...} / rpc
+            enabled = info.get("enabled", False)
+            manifest = info.get("manifest", {}) or {}
+            name = manifest.get("name", identifier)
+            version = manifest.get("version", "?")
+            desc = manifest.get("description", "")
+            state = "§a启用" if enabled else "§c禁用"
+            source.reply(f"§b- §f{name} §7v{version} [{state}]")
+            if desc:
+                source.reply(f"  §7{desc}")
+    source.reply("---------------------------------------------")
 
 async def reload(source: CommandSource):
     """重载插件配置"""
@@ -812,9 +937,9 @@ async def list_bot_prefixes(source: CommandSource):
 # 新增：定期UUID同步检查函数
 @new_thread("UUID_Sync_Check")
 def periodic_uuid_check():
-    """定期检查和修复UUID不一致问题"""
+    """定期检查和修复UUID不一致问题，并通过 RCON list 校准 session 锚点"""
     import time
-    from easybot_mcdr.api.player import online_players, uuid_map, generate_offline_uuid, update_player_uuid
+    from easybot_mcdr.api.player import online_players, uuid_map, generate_offline_uuid, update_player_uuid, register_session
     from easybot_mcdr.impl.get_server_info import get_online_mode
     
     while True:
@@ -838,8 +963,53 @@ def periodic_uuid_check():
                     if current_uuid != expected_uuid and current_uuid in ["unknown", "", None]:
                         server.logger.warning(f"检测到玩家 {player} UUID不一致，正在修复...")
                         update_player_uuid(player, expected_uuid)
-                        
+                        register_session(player, expected_uuid)
+
+            # RCON list 校准：服务端 list 返回的永远是真实账号名，不受聊天格式影响
+            _calibrate_sessions_with_rcon()
+                    
         except Exception as e:
             server = ServerInterface.get_instance()
             server.logger.error(f"UUID同步检查出错: {e}")
             server.logger.debug("\n{traceback.format_exc()}")
+
+
+def _calibrate_sessions_with_rcon():
+    """通过 RCON list 命令校准 session 锚点，兜底处理 join 日志被改写的极端情况"""
+    import re
+    server = ServerInterface.get_instance()
+    if not server.is_rcon_running():
+        return
+    try:
+        result = server.rcon_query('list')
+        if not result:
+            return
+        # 解析 "There are X of a max Y players online: name1, name2"
+        match = re.search(
+            r'There are (\d+) of a max (\d+) players online[^\d]*?(?:[:]?\s*(.*))?$',
+            result, re.IGNORECASE
+        )
+        if not match:
+            return
+        player_list_str = match.group(3) or ''
+        real_names = [p.strip() for p in player_list_str.split(',') if p.strip()]
+        if not real_names:
+            return
+
+        from easybot_mcdr.api.player import online_players, uuid_map, generate_offline_uuid, update_player_uuid, register_session, player_sessions, get_online_mode
+        # 为 RCON 列表中存在但 session 缺失的玩家补建锚点
+        for name in real_names:
+            # 已有 session 跳过
+            already = any(s["real_name"] == name for s in player_sessions.values())
+            if already:
+                continue
+            uuid = uuid_map.get(name)
+            if not uuid or uuid == "unknown":
+                if not get_online_mode():
+                    uuid = generate_offline_uuid(name)
+                    update_player_uuid(name, uuid)
+            if uuid and uuid != "unknown":
+                register_session(name, uuid)
+                server.logger.debug(f"RCON 校准: 已为玩家 {name} 补建 session 锚点 (UUID={uuid})")
+    except Exception as e:
+        server.logger.debug(f"RCON session 校准跳过: {e}")

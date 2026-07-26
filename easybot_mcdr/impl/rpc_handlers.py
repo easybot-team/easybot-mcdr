@@ -1,9 +1,6 @@
-import asyncio
-
 from mcdreforged.api.all import ServerInterface
-from easybot_mcdr.rpc import bridge_rpc
+from easybot_mcdr.rpc import bridge_rpc, _registry
 from easybot_mcdr.impl.bridge_behavior_impl import DefaultBridgeBehavior
-from easybot_mcdr.message import segments_from_list
 
 
 def _behavior():
@@ -11,116 +8,131 @@ def _behavior():
     return DefaultBridgeBehavior(server)
 
 
+# ============================================================
+# PING — MCDR 自有，bridge 无对应
+# ============================================================
 @bridge_rpc("PING", description="Health check")
 async def ping(ctx, data, session_info):
     await ctx.callback({"success": True, "text": "pong"})
 
 
+# ============================================================
+# GET_EXTENSIONS — 对应 bridge 的 GET_EXTENSIONS
+# 回调结构: { extensions: { <identifier>: { name, description, author, version, required_plugins, identifier, rpc } } }
+#
+# 注意: SEND_TO_CHAT / PLACEHOLDER_API_QUERY / UN_BIND_NOTIFY /
+#       BIND_SUCCESS_NOTIFY / PLAYER_LIST / GET_SERVER_INFO / RUN_COMMAND
+#       均已在 impl/ 下的独立模块中注册监听器，此处不再重复注册。
+# ============================================================
 @bridge_rpc("GET_EXTENSIONS", description="Get installed extensions")
 async def get_extensions(ctx, data, session_info):
-    await ctx.callback({"success": True, "extensions": {}})
+    """
+    返回当前 MCDR 端已注册的扩展信息。
+    严格按照 bridge 的 GET_EXTENSIONS 回调结构上报：每个扩展以 identifier 为 key，
+    值为扁平结构 (name/description/author/version/required_plugins/identifier/rpc)。
+    rpc 方法的值也按 bridge 格式 (identifier/method/description/displayName/fullMethodClassName)。
+    不额外添加 success 字段，与 bridge 完全一致。
+    """
+    from easybot_mcdr.meta import get_plugin_version
+
+    rpc_methods = {}
+    for exec_op_key, handler in _registry.items():
+        rpc_methods[exec_op_key] = {
+            "identifier": "easybot-mcdr",
+            "method": exec_op_key,
+            "description": (getattr(handler, "__doc__", "") or "").strip(),
+            "displayName": exec_op_key,
+            "fullMethodClassName": f"easybot_mcdr.impl.rpc_handlers.{getattr(handler, '__name__', exec_op_key)}",
+        }
+
+    extension = {
+        "name": "EasyBot MCDR",
+        "description": "EasyBot MCDR 桥接插件",
+        "author": "EasyBot",
+        "version": get_plugin_version(),
+        "required_plugins": [],
+        "identifier": "easybot-mcdr",
+        "rpc": rpc_methods,
+    }
+
+    extensions = {"easybot-mcdr": extension}
+    await ctx.callback({"extensions": extensions})
 
 
-@bridge_rpc("SYNC_SEGMENTS", description="Sync structured message to chat")
-async def sync_segments(ctx, data, session_info):
-    segments = segments_from_list(data.get("segments", []) or [])
-    text = data.get("text", "")
-    _behavior().sync_to_chat_extra(segments, text)
-    await ctx.callback({"success": True})
-
-
-@bridge_rpc("PAPI_QUERY", description="PAPI disabled")
-async def papi_query(ctx, data, session_info):
-    query = data.get("query") or ""
-    await ctx.callback({"success": False, "text": f"PAPI disabled: {query}"})
-
-
-@bridge_rpc("KICK_PLAYER", description="Kick player with message")
-async def kick_player(ctx, data, session_info):
-    player = data.get("player_name") or ""
-    msg = data.get("message") or ""
-    try:
-        _behavior().kick_player(player, msg)
-        await ctx.callback({"success": True})
-    except Exception as e:
-        await ctx.callback({"success": False, "text": str(e)})
-
-
-@bridge_rpc("BIND_SUCCESS_BROADCAST", description="Broadcast bind success message")
-async def bind_success_broadcast(ctx, data, session_info):
-    player = data.get("player_name") or ""
-    account_id = data.get("account_id") or ""
-    account_name = data.get("account_name") or ""
-    try:
-        _behavior().bind_success_broadcast(player, account_id, account_name)
-        await ctx.callback({"success": True})
-    except Exception as e:
-        await ctx.callback({"success": False, "text": str(e)})
-
-
-@bridge_rpc("SYNC_CHAT", description="Sync plain chat message")
-async def sync_chat(ctx, data, session_info):
-    msg = data.get("message") or ""
-    try:
-        _behavior().sync_to_chat(msg)
-        await ctx.callback({"success": True})
-    except Exception as e:
-        await ctx.callback({"success": False, "text": str(e)})
-
-
-@bridge_rpc("GET_PLAYER_LIST", description="Get online player list")
-async def get_player_list(ctx, data, session_info):
-    try:
-        players = _behavior().get_player_list()
-        await ctx.callback({"success": True, "players": players})
-    except Exception as e:
-        await ctx.callback({"success": False, "text": str(e)})
-
-
+# ============================================================
+# MODULE_INSTALLED — 对应 bridge 的 MODULE_INSTALLED
+# 请求字段: module_name (String)  ← bridge 用 module_name，不是 name
+# 回调结构: { installed (bool) }  ← bridge 用 installed，不是 result
+# ============================================================
 @bridge_rpc("MODULE_INSTALLED", description="Check if a module/plugin is installed")
 async def module_installed(ctx, data, session_info):
-    name = data.get("name") or ""
-    await ctx.callback({"success": True, "result": _behavior().module_is_installed(name)})
+    name = data.get("module_name") or data.get("name") or ""
+    await ctx.callback({"installed": _behavior().module_is_installed(name)})
 
 
+# ============================================================
+# MODULE_ENABLED — 对应 bridge 的 MODULE_ENABLED
+# 请求字段: module_name (String)
+# 回调结构: { enabled (bool) }
+# ============================================================
 @bridge_rpc("MODULE_ENABLED", description="Check if a module/plugin is enabled")
 async def module_enabled(ctx, data, session_info):
-    name = data.get("name") or ""
-    await ctx.callback({"success": True, "result": _behavior().module_is_enabled(name)})
+    name = data.get("module_name") or data.get("name") or ""
+    await ctx.callback({"enabled": _behavior().module_is_enabled(name)})
 
 
+# ============================================================
+# IS_AUTHENTICATED — 对应 bridge 的 IS_AUTHENTICATED
+# 请求字段: player_name (String)
+# 回调结构: { authenticated (bool) }  ← bridge 用 authenticated，不是 result
+#
+# MCDR 端不维护玩家认证/绑定状态，始终返回 False。
+# 主程序应通过 GET_SOCIAL_ACCOUNT 等接口自行查询。
+# ============================================================
 @bridge_rpc("IS_AUTHENTICATED", description="Check if a player is authenticated/bound")
 async def is_authenticated(ctx, data, session_info):
     player_name = data.get("player_name") or ""
-    await ctx.callback({"success": True, "result": _behavior().is_authenticated(player_name)})
+    await ctx.callback({"authenticated": _behavior().is_authenticated(player_name)})
 
 
+# ============================================================
+# GET_PLAYER_SKIN — 对应 bridge 的 GET_PLAYER_SKIN
+# 请求字段: player_name (String)
+# 回调结构: { message (String), result (int), skin_url (String, 可选), cape_url (String, 可选) }
+# 注意: bridge 不发 success 字段
+# ============================================================
 @bridge_rpc("GET_PLAYER_SKIN", description="Get player skin URL")
 async def get_player_skin(ctx, data, session_info):
     player_name = data.get("player_name") or ""
     skin_data = _behavior().get_player_skin(player_name)
     if skin_data:
-        await ctx.callback({
-            "success": True,
+        callback_data = {
             "message": "found",
-            "result": 1,  # Succeeded
+            "result": 1,  # GetPlayerSkinResult.Succeeded
             "skin_url": skin_data.get("skin_url", ""),
-            "cape_url": skin_data.get("cape_url", "")
-        })
+        }
+        cape = skin_data.get("cape_url")
+        if cape:
+            callback_data["cape_url"] = cape
+        await ctx.callback(callback_data)
     else:
         await ctx.callback({
-            "success": False,
             "message": "not found",
-            "result": 2  # Notfound
+            "result": 2  # GetPlayerSkinResult.Notfound
         })
 
 
+# ============================================================
+# READ_NBT_DATA — 对应 bridge 的 READ_NBT_DATA
+# 请求字段: player_uuid (String), data_type (int/String)
+# 回调结构: { message (String), result (int), data (JsonObject, 可选) }
+# 注意: bridge 不发 success 字段
+# ============================================================
 @bridge_rpc("READ_NBT_DATA", description="Read player NBT data (0=PlayerData, 1=Advancements, 2=Statistics)")
 async def read_nbt_data(ctx, data, session_info):
     player_uuid = data.get("player_uuid") or ""
     data_type = data.get("data_type", 0)
 
-    # 支持字符串类型的 data_type 转换为数字
     DATA_TYPE_MAP = {
         "PlayerData": 0,
         "Advancements": 1,
@@ -136,23 +148,18 @@ async def read_nbt_data(ctx, data, session_info):
         result = _behavior().read_nbt_data(player_uuid, data_type)
         if result is None:
             await ctx.callback({
-                "success": False,
                 "message": "not found",
                 "result": 2  # ReadNbtResult.Notfound
             })
         else:
-            # 直接返回解析后的 JSON 数据作为 data 字段
-            # 服务端期望 data 字段是解析后的 JsonObject
             parsed_data = result.get("parsed", {})
             await ctx.callback({
-                "success": True,
                 "message": "found",
                 "result": 1,  # ReadNbtResult.Succeeded
-                "data": parsed_data  # 直接返回解析后的 JSON 对象
+                "data": parsed_data
             })
     except Exception as e:
         await ctx.callback({
-            "success": False,
             "message": str(e),
             "result": 3  # ReadNbtResult.Error
         })
