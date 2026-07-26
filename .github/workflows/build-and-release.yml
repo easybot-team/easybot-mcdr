@@ -42,7 +42,12 @@ jobs:
       - name: 运行插件测试
         id: plugin_test
         run: |
+          # 运行基础测试套件
           pytest tests/test_plugin.py -v --tb=short 2>&1 | tee /tmp/test-output.txt
+          # 运行专门的 bug 复现测试
+          pytest tests/test_prefix_bug.py -v --tb=short 2>&1 | tee /tmp/test-prefix-output.txt
+          # 合并测试结果
+          cat /tmp/test-prefix-output.txt >> /tmp/test-output.txt
           echo "TEST_EXIT_CODE=$?" >> $GITHUB_ENV
         continue-on-error: true
 
