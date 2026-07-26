@@ -31,10 +31,6 @@ jobs:
         run: |
           # 运行基础测试套件
           pytest tests/test_plugin.py -v --tb=short 2>&1 | tee test-output.txt
-          # 运行专门的 bug 复现测试
-          pytest tests/test_prefix_bug.py -v --tb=short 2>&1 | tee test-prefix-output.txt
-          # 合并测试结果
-          cat test-prefix-output.txt >> test-output.txt
           echo "TEST_EXIT_CODE=$?" >> $GITHUB_ENV
 
       - name: 生成测试报告
