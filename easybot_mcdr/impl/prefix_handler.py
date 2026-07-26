@@ -51,7 +51,11 @@ class PrefixNameHandler(VanillaHandler):
                 r'(?P<name>[^>]+)> (?P<message>.*)',
                 info.content
             )
-            if m and self._verify_player_name(m['name']):
-                info.player = m['name']
-                info.content = m['message']
+            if m:
+                # 正则的 name 组可能捕获到前导空格 (如 ' lin_alice'),
+                # 会导致 _verify_player_name 因空格拒绝; 这里先 strip 再校验
+                name = m['name'].strip()
+                if self._verify_player_name(name):
+                    info.player = name
+                    info.content = m['message']
         return info
